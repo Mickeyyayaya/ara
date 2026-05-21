@@ -10,7 +10,6 @@
 module vector_fus_stage import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::idx_width; #(
     parameter  int           unsigned NrLanes         = 0,
     parameter  int           unsigned VLEN            = 0,
-    parameter  config_pkg::cva6_cfg_t CVA6Cfg         = cva6_config_pkg::cva6_cfg,
     // Support for floating-point data types
     parameter  fpu_support_e          FPUSupport      = FPUSupportHalfSingleDouble,
     // External support for vfrec7, vfrsqrt7
@@ -41,6 +40,8 @@ module vector_fus_stage import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg
     output logic           [NrVInsn-1:0]      alu_vinsn_done_o,
     output logic                              mfpu_ready_o,
     output logic           [NrVInsn-1:0]      mfpu_vinsn_done_o,
+    output logic                              tmac_ready_o,
+    output logic           [NrVInsn-1:0]      tmac_vinsn_done_o,
     // Interface with the lane
     output logic                              alu_red_complete_o,
     output logic                              fpu_red_complete_o,
@@ -51,6 +52,9 @@ module vector_fus_stage import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg
     input  elen_t          [2:0]              mfpu_operand_i,
     input  logic           [2:0]              mfpu_operand_valid_i,
     output logic           [2:0]              mfpu_operand_ready_o,
+    input  elen_t          [2:0]              tmac_operand_i,
+    input  logic           [2:0]              tmac_operand_valid_i,
+    output logic           [2:0]              tmac_operand_ready_o,
     // Interface with the vector register file
     output logic                              alu_result_req_o,
     output vid_t                              alu_result_id_o,
@@ -65,6 +69,13 @@ module vector_fus_stage import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg
     output elen_t                             mfpu_result_wdata_o,
     output strb_t                             mfpu_result_be_o,
     input  logic                              mfpu_result_gnt_i,
+    // Tmac
+    output logic                              tmac_result_req_o,
+    output vid_t                              tmac_result_id_o,
+    output vaddr_t                            tmac_result_addr_o,
+    output elen_t                             tmac_result_wdata_o,
+    output strb_t                             tmac_result_be_o,
+    input  logic                              tmac_result_gnt_i,
     // Interface with the Slide Unit
     input  elen_t                             sldu_operand_i,
     output logic                              sldu_alu_req_valid_o,
@@ -81,7 +92,21 @@ module vector_fus_stage import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg
     input  logic           [NrMaskFUnits-1:0] mask_operand_ready_i,
     input  strb_t                             mask_i,
     input  logic                              mask_valid_i,
-    output logic                              mask_ready_o
+    output logic                              mask_ready_o,
+    // Interface with custom pe wrapper
+    output logic                              custom_pe_ready_o,
+    output logic            [NrVInsn-1:0]     custom_pe_vinsn_done_o,
+    // CustomPE operads
+    input  elen_t          [NrCustomPEOperands-1:0] custom_pe_operand_i,
+    input  logic           [NrCustomPEOperands-1:0] custom_pe_operand_valid_i,
+    output logic           [NrCustomPEOperands-1:0] custom_pe_operand_ready_o,
+    // CustomPE results
+    output logic                              custom_pe_result_req_o,
+    output vid_t                              custom_pe_result_id_o,
+    output vaddr_t                            custom_pe_result_addr_o,
+    output elen_t                             custom_pe_result_wdata_o,
+    output strb_t                             custom_pe_result_be_o,
+    input  logic                              custom_pe_result_gnt_i
   );
 
   ///////////////
@@ -94,7 +119,9 @@ module vector_fus_stage import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg
   // broadcasted signals if more masked instructions can be in different units at the same time.
   logic alu_mask_ready;
   logic mfpu_mask_ready;
-  assign mask_ready_o = alu_mask_ready | mfpu_mask_ready;
+  logic tmac_mask_ready;
+  logic custom_pe_mask_ready;
+  assign mask_ready_o = alu_mask_ready | mfpu_mask_ready | custom_pe_mask_ready | tmac_mask_ready;
 
   // saturation selection
   logic alu_vxsat, mfpu_vxsat;
@@ -158,7 +185,6 @@ module vector_fus_stage import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg
   vmfpu #(
     .NrLanes        (NrLanes        ),
     .VLEN           (VLEN           ),
-    .CVA6Cfg        (CVA6Cfg        ),
     .FPUSupport     (FPUSupport     ),
     .FPExtSupport   (FPExtSupport   ),
     .FixPtSupport   (FixPtSupport   ),
@@ -207,4 +233,63 @@ module vector_fus_stage import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg
     .mask_ready_o         (mfpu_mask_ready                 )
   );
 
+
+  /////////////////
+  // Vector TMAC //
+  /////////////////
+
+  vtmac #(
+    .NrLanes        (NrLanes),
+    .VLEN           (VLEN),
+    .FPUSupport     (FPUSupport),
+    .FPExtSupport   (FPExtSupport),
+    .FixPtSupport   (FixPtSupport),
+    .vaddr_t        (vaddr_t),
+    .vfu_operation_t(vfu_operation_t)
+  ) i_vtmac (
+    .clk_i                (clk_i),
+    .rst_ni               (rst_ni),
+    .lane_id_i            (lane_id_i),
+    // --- Interface with Dispatcher ---
+    .tmac_vxsat_o         (), 
+    .tmac_vxrm_i          (alu_vxrm_i),
+    // --- Interface with CVA6 ---
+    .fflags_ex_o          (), 
+    .fflags_ex_valid_o    (), 
+    // --- Interface with the lane sequencer ---
+    .vfu_operation_i      (vfu_operation_i),
+    .vfu_operation_valid_i(vfu_operation_valid_i),
+    .tmac_ready_o         (tmac_ready_o),
+    .tmac_vinsn_done_o    (tmac_vinsn_done_o),
+    // --- Interface with the lane ---
+    .tmac_red_complete_o  (), 
+    // --- Interface with the operand queues ---
+    .tmac_operand_i       (tmac_operand_i),
+    .tmac_operand_valid_i (tmac_operand_valid_i),
+    .tmac_operand_ready_o (tmac_operand_ready_o),
+    // --- Interface with the vector register file ---
+    .tmac_result_req_o    (tmac_result_req_o),
+    .tmac_result_id_o     (tmac_result_id_o),
+    .tmac_result_addr_o   (tmac_result_addr_o),
+    .tmac_result_wdata_o  (tmac_result_wdata_o),
+    .tmac_result_be_o     (tmac_result_be_o),
+    .tmac_result_gnt_i    (tmac_result_gnt_i),
+    // --- Interface with the Slide Unit  ---
+    .tmac_red_valid_o     (),
+    .tmac_red_ready_i     (1'b1), 
+    .sldu_operand_i       (sldu_operand_i), 
+    .sldu_tmac_valid_i    (1'b0), 
+    .sldu_tmac_ready_o    (),
+    // --- Interface with the Mask unit ---
+    .mask_operand_o       (), 
+    .mask_operand_valid_o (),
+    .mask_operand_ready_i (1'b1), 
+    .mask_i               (mask_i),
+    .mask_valid_i         (mask_valid_i),
+    .mask_ready_o         (tmac_mask_ready)
+  );
+
+
+
+  
 endmodule : vector_fus_stage

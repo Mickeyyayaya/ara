@@ -524,6 +524,7 @@ module simd_alu import ara_pkg::*; import rvv_pkg::*; #(
                 {mask_i[4*b], (less[4*b] || equal[4*b]) ^ (op_i inside {VMSGT, VMSGTU})};
             EW64: for (int b = 0; b < 1; b++) res.w64[b][1:0] =
                 {mask_i[8*b], (less[8*b] || equal[8*b]) ^ (op_i inside {VMSGT, VMSGTU})};
+
           endcase
 
         default:;

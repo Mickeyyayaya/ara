@@ -19,16 +19,6 @@ module ara import ara_pkg::*; #(
     parameter  fixpt_support_e        FixPtSupport = FixedPointEnable,
     // Support for segment memory operations
     parameter  seg_support_e          SegSupport   = SegSupportEnable,
-    // CVA6 configuration
-    parameter  config_pkg::cva6_cfg_t CVA6Cfg      = cva6_config_pkg::cva6_cfg,
-    // CVA6-related parameters
-    parameter type                    exception_t        = logic,
-    parameter type                    accelerator_req_t  = logic,
-    parameter type                    accelerator_resp_t = logic,
-    parameter type                    acc_mmu_req_t      = logic,
-    parameter type                    acc_mmu_resp_t     = logic,
-    parameter type                    cva6_to_acc_t      = logic,
-    parameter type                    acc_to_cva6_t      = logic,
     // AXI Interface
     parameter  int           unsigned AxiDataWidth = 0,
     parameter  int           unsigned AxiAddrWidth = 0,
@@ -42,7 +32,7 @@ module ara import ara_pkg::*; #(
     // Dependant parameters. DO NOT CHANGE!
     // Ara has NrLanes + 3 processing elements: each one of the lanes, the vector load unit, the
     // vector store unit, the slide unit, and the mask unit.
-    localparam int           unsigned NrPEs        = NrLanes + 4,
+    localparam int           unsigned NrPEs        = NrLanes + 5,
     localparam type                   vlen_t       = logic[$clog2(VLEN+1)-1:0],
     localparam int           unsigned VLENB        = VLEN / 8
   ) (
@@ -164,7 +154,7 @@ module ara import ara_pkg::*; #(
     elen_t resp;
 
     // Instruction triggered an exception
-    exception_t exception;
+    ariane_pkg::exception_t exception;
 
     // Fault-only-first exception on element whose idx > 0
     logic fof_exception;
@@ -199,15 +189,12 @@ module ara import ara_pkg::*; #(
   logic [NrLanes-1:0] lsu_ex_flush_stu;
 
   ara_dispatcher #(
-    .CVA6Cfg           (CVA6Cfg           ),
-    .NrLanes           (NrLanes           ),
-    .VLEN              (VLEN              ),
-    .FPUSupport        (FPUSupport        ),
-    .SegSupport        (SegSupport        ),
-    .ara_req_t         (ara_req_t         ),
-    .ara_resp_t        (ara_resp_t        ),
-    .accelerator_req_t (accelerator_req_t ),
-    .accelerator_resp_t(accelerator_resp_t)
+    .NrLanes   (NrLanes   ),
+    .VLEN      (VLEN      ),
+    .FPUSupport(FPUSupport),
+    .SegSupport(SegSupport),
+    .ara_req_t (ara_req_t ),
+    .ara_resp_t(ara_resp_t)
   ) i_dispatcher (
     .clk_i             (clk_i           ),
     .rst_ni            (rst_ni          ),
@@ -239,7 +226,10 @@ module ara import ara_pkg::*; #(
   /////////////////
   //  Sequencer  //
   /////////////////
-
+  always_comb begin
+    $display("vlen_t: %0d, VLEN: %0d, NrLanes: %0d", VLEN, VLEN, NrLanes);
+    $display("data width: %0d, strb width: %0d", $bits(elen_t), $bits(strb_t));
+  end
   // Interface with the PEs
   pe_req_t                         pe_req;
   logic                            pe_req_valid;
@@ -248,12 +238,14 @@ module ara import ara_pkg::*; #(
   pe_resp_t          [NrPEs-1:0]   pe_resp;
   // Interface with the address generator
   logic                            addrgen_ack;
-  exception_t                      addrgen_exception;
+  ariane_pkg::exception_t          addrgen_exception;
   vlen_t                           addrgen_exception_vstart;
   logic                            addrgen_fof_exception;
   logic                            lsu_current_burst_exception;
   logic              [NrLanes-1:0] alu_vinsn_done;
   logic              [NrLanes-1:0] mfpu_vinsn_done;
+  logic             [NrLanes-1:0]  tmac_vinsn_done;
+  logic             [NrLanes-1:0]  custom_pe_vinsn_done;
   // Interface with the operand requesters
   logic [NrVInsn-1:0][NrVInsn-1:0] global_hazard_table;
   // Ready for lane 0 (scalar operand fwd)
@@ -273,13 +265,12 @@ module ara import ara_pkg::*; #(
   logic      result_scalar_valid;
 
   ara_sequencer #(
-    .NrLanes    (NrLanes   ),
-    .VLEN       (VLEN      ),
-    .ara_req_t  (ara_req_t ),
-    .ara_resp_t (ara_resp_t),
-    .pe_req_t   (pe_req_t  ),
-    .pe_resp_t  (pe_resp_t ),
-    .exception_t(exception_t)
+    .NrLanes   (NrLanes   ),
+    .VLEN      (VLEN      ),
+    .ara_req_t (ara_req_t ),
+    .ara_resp_t(ara_resp_t),
+    .pe_req_t  (pe_req_t  ),
+    .pe_resp_t (pe_resp_t )
   ) i_sequencer (
     .clk_i                 (clk_i                    ),
     .rst_ni                (rst_ni                   ),
@@ -298,6 +289,8 @@ module ara import ara_pkg::*; #(
     .pe_resp_i             (pe_resp                  ),
     .alu_vinsn_done_i      (alu_vinsn_done[0]        ),
     .mfpu_vinsn_done_i     (mfpu_vinsn_done[0]       ),
+    .tmac_vinsn_done_i     (tmac_vinsn_done[0]       ),
+    .custom_pe_vinsn_done_i(custom_pe_vinsn_done[0]  ),
     // Interface with the operand requesters
     .global_hazard_table_o (global_hazard_table      ),
     // Interface with the lane 0
@@ -370,7 +363,6 @@ module ara import ara_pkg::*; #(
     lane #(
       .NrLanes              (NrLanes              ),
       .VLEN                 (VLEN                 ),
-      .CVA6Cfg              (CVA6Cfg              ),
       .FPUSupport           (FPUSupport           ),
       .FPExtSupport         (FPExtSupport         ),
       .FixPtSupport         (FixPtSupport         ),
@@ -399,6 +391,8 @@ module ara import ara_pkg::*; #(
       .pe_resp_o                       (pe_resp[lane]                       ),
       .alu_vinsn_done_o                (alu_vinsn_done[lane]                ),
       .mfpu_vinsn_done_o               (mfpu_vinsn_done[lane]               ),
+      .tmac_vinsn_done_o               (tmac_vinsn_done[lane]               ),
+      .custom_pe_vinsn_done_o          (custom_pe_vinsn_done[lane]          ),
       .global_hazard_table_i           (global_hazard_table                 ),
       // Interface with the slide unit
       .sldu_result_req_i               (sldu_result_req[lane]               ),
@@ -460,10 +454,10 @@ module ara import ara_pkg::*; #(
   // Optional OS support
   logic acc_mmu_misaligned_ex, acc_mmu_req, acc_mmu_is_store, acc_mmu_dtlb_hit, acc_mmu_valid;
   logic acc_mmu_en, acc_mmu_en_q;
-  logic [CVA6Cfg.VLEN-1:0] acc_mmu_vaddr;
-  logic [CVA6Cfg.PLEN-1:0] acc_mmu_paddr;
-  logic [CVA6Cfg.PPNW-1:0] acc_mmu_dtlb_ppn;
-  exception_t acc_mmu_exception;
+  logic [riscv::VLEN-1:0] acc_mmu_vaddr;
+  logic [riscv::PLEN-1:0] acc_mmu_paddr;
+  logic [riscv::PPNW-1:0] acc_mmu_dtlb_ppn;
+  ariane_pkg::exception_t acc_mmu_exception;
 
   if (OSSupport) begin
     assign acc_resp_o.acc_mmu_req.acc_mmu_misaligned_ex = acc_mmu_misaligned_ex;
@@ -507,9 +501,7 @@ module ara import ara_pkg::*; #(
     .axi_resp_t  (axi_resp_t  ),
     .vaddr_t     (vaddr_t     ),
     .pe_req_t    (pe_req_t    ),
-    .pe_resp_t   (pe_resp_t   ),
-    .CVA6Cfg     (CVA6Cfg     ),
-    .exception_t (exception_t )
+    .pe_resp_t   (pe_resp_t   )
   ) i_vlsu (
     .clk_i                      (clk_i                                                 ),
     .rst_ni                     (rst_ni                                                ),

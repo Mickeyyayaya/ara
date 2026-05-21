@@ -9,15 +9,10 @@
 // response or an error message.
 
 module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
-    parameter int           unsigned NrLanes            = 0,
-    parameter int           unsigned VLEN               = 0,
-    parameter type                   ara_req_t          = logic,
-    parameter type                   ara_resp_t         = logic,
-    parameter type                   accelerator_req_t  = logic,
-    parameter type                   accelerator_resp_t = logic,
-    // CVA6 configuration
-    parameter config_pkg::cva6_cfg_t CVA6Cfg      = cva6_config_pkg::cva6_cfg,
-    localparam type                  xlen_t       = logic [CVA6Cfg.XLEN-1:0],
+    parameter int           unsigned NrLanes      = 0,
+    parameter int           unsigned VLEN         = 0,
+    parameter type                   ara_req_t    = logic,
+    parameter type                   ara_resp_t   = logic,
     // Support for floating-point data types
     parameter fpu_support_e          FPUSupport   = FPUSupportHalfSingleDouble,
     // External support for vfrec7, vfrsqrt7
@@ -81,15 +76,15 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
   `FF(csr_vxsat_q, csr_vxsat_d, '0)
   `FF(csr_vxrm_q, csr_vxrm_d, '0)
   // Converts between the internal representation of `vtype_t` and the full XLEN-bit CSR.
-  function automatic xlen_t xlen_vtype(vtype_t vtype);
-    xlen_vtype = {vtype.vill, {CVA6Cfg.XLEN-9{1'b0}}, vtype.vma, vtype.vta, vtype.vsew,
+  function automatic riscv::xlen_t xlen_vtype(vtype_t vtype);
+    xlen_vtype = {vtype.vill, {riscv::XLEN-9{1'b0}}, vtype.vma, vtype.vta, vtype.vsew,
       vtype.vlmul[2:0]};
   endfunction: xlen_vtype
 
   // Converts between the XLEN-bit vtype CSR and its internal representation
-  function automatic vtype_t vtype_xlen(xlen_t xlen);
+  function automatic vtype_t vtype_xlen(riscv::xlen_t xlen);
     vtype_xlen = '{
-      vill  : xlen[CVA6Cfg.XLEN-1],
+      vill  : xlen[riscv::XLEN-1],
       vma   : xlen[7],
       vta   : xlen[6],
       vsew  : vew_e'(xlen[5:3]),
@@ -109,19 +104,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
       default : next_lmul = LMUL_RSVD;
     endcase
   endfunction : next_lmul
-
-  // Calculates prev(lmul)
-  function automatic vlmul_e prev_lmul(vlmul_e lmul);
-    unique case (lmul)
-      LMUL_1_4: prev_lmul = LMUL_1_8;
-      LMUL_1_2: prev_lmul = LMUL_1_4;
-      LMUL_1  : prev_lmul = LMUL_1_2;
-      LMUL_2  : prev_lmul = LMUL_1;
-      LMUL_4  : prev_lmul = LMUL_2;
-      LMUL_8  : prev_lmul = LMUL_4;
-      default : prev_lmul = LMUL_RSVD;
-    endcase
-  endfunction : prev_lmul
 
   // Calculates prev(prev(ew))
   function automatic vew_e prev_prev_ew(vew_e ew);
@@ -190,9 +172,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
   logic [2:0] reshuffle_req_d, reshuffle_req_q;
   // Segment memory operations end or ongoing?
   logic seg_mem_op_end, pending_seg_mem_op_d, pending_seg_mem_op_q;
-  // Easily handle the riscv incoming instruction
-  riscv::instruction_t instr;
-  assign instr = riscv::instruction_t'(acc_req_i.insn);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -255,8 +234,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
   logic in_lane_op;
   // If the vslideup offset is greater than csr_vl_q, the vslideup has no effects
   logic null_vslideup;
-  // Does the selected reg group for the selected EMUL have same EEW encoding?
-  logic is_same_eew;
 
   // Pipeline the VLSU's load and store complete signals, for timing reasons
   logic load_complete, load_complete_q;
@@ -484,7 +461,7 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
       // Inject a reshuffle instruction
       RESHUFFLE: begin
         // Instruction is of one of the RVV types
-        automatic rvv_instruction_t insn = rvv_instruction_t'(instr.instr);
+        automatic rvv_instruction_t insn = rvv_instruction_t'(acc_req_i.insn.instr);
 
         // Stall the interface, wait for the backend to accept the injected uop
         acc_resp_o.req_ready  = 1'b0;
@@ -611,14 +588,14 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
         acc_resp_o.req_ready = 1'b1;
 
         // Decode the instructions based on their opcode
-        unique case (instr.itype.opcode)
+        unique case (acc_req_i.insn.itype.opcode)
           //////////////////////////////////////
           //  Vector Arithmetic instructions  //
           //////////////////////////////////////
 
           riscv::OpcodeVec: begin
             // Instruction is of one of the RVV types
-            automatic rvv_instruction_t insn = rvv_instruction_t'(instr.instr);
+            automatic rvv_instruction_t insn = rvv_instruction_t'(acc_req_i.insn.instr);
 
             // These (mostly) always respond at the same cycle
             acc_resp_o.resp_valid = 1'b1;
@@ -633,11 +610,11 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
 
                 // Update vtype
                 if (insn.vsetvli_type.func1 == 1'b0) begin // vsetvli
-                  csr_vtype_d = vtype_xlen(xlen_t'(insn.vsetvli_type.zimm11));
+                  csr_vtype_d = vtype_xlen(riscv::xlen_t'(insn.vsetvli_type.zimm11));
                 end else if (insn.vsetivli_type.func2 == 2'b11) begin // vsetivli
-                  csr_vtype_d = vtype_xlen(xlen_t'(insn.vsetivli_type.zimm10));
+                  csr_vtype_d = vtype_xlen(riscv::xlen_t'(insn.vsetivli_type.zimm10));
                 end else if (insn.vsetvl_type.func7 == 7'b100_0000) begin // vsetvl
-                  csr_vtype_d = vtype_xlen(xlen_t'(acc_req_i.rs2[7:0]));
+                  csr_vtype_d = vtype_xlen(riscv::xlen_t'(acc_req_i.rs2[7:0]));
                 end else
                   illegal_insn = 1'b1;
 
@@ -855,6 +832,8 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                   6'b100000: ara_req.op = ara_pkg::VSADDU;
                   6'b100001: ara_req.op = ara_pkg::VSADD;
                   6'b100010: ara_req.op = ara_pkg::VSSUBU;
+                  //6'b111111: ara_req.op = ara_pkg::VCUSTOM_MAC;
+                  //6'b111110: ara_req.op = ara_pkg::VBITLINEAR;
                   6'b100011: ara_req.op = ara_pkg::VSSUB;
                   6'b100101: ara_req.op = ara_pkg::VSLL;
                   6'b100111: ara_req.op = ara_pkg::VSMUL;
@@ -926,7 +905,29 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                     ara_req.conversion_vs2 = OpQueueConversionSExt2;
                     ara_req.cvt_resize     = CVT_WIDE;
                   end
+                  /*
+                  6'b110010: ara_req.op = ara_pkg::VTMUL1;
+                  6'b110011: ara_req.op = ara_pkg::VTMUL2;
+                  6'b110100: ara_req.op = ara_pkg::VTMUL3;
+                  6'b111111: ara_req.op = ara_pkg::VTMUL4;
+                 */
+                  6'b110010, 6'b110011, 6'b110100, 6'b111111: begin
+                    // Assign correct op based on funct6
+                    unique case (insn.varith_type.func6)
+                      6'b110010: ara_req.op = ara_pkg::VTMUL1;
+                      6'b110011: ara_req.op = ara_pkg::VTMUL2;
+                      6'b110100: ara_req.op = ara_pkg::VTMUL3;
+                      6'b111111: ara_req.op = ara_pkg::VTMUL4;
+                      default:   illegal_insn = 1'b1;
+                    endcase
+                    // This is the key fix: Tell the system this is an accumulate operation
+                    ara_req.use_vd_op = 1'b1;
+                  end
+                 
+                 
                   default: illegal_insn = 1'b1;
+                
+                  
                 endcase
 
                 // Instructions with an integer LMUL have extra constraints on the registers they can
@@ -1662,8 +1663,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                         ara_req.conversion_vs2 = OpQueueConversionZExt8;
                         ara_req.eew_vs2        = eew_q[insn.varith_type.rs2];
                         ara_req.cvt_resize     = CVT_WIDE;
-                        ara_req.emul           = csr_vtype_q.vlmul;
-                        lmul_vs2               = prev_lmul(prev_lmul(prev_lmul(csr_vtype_q.vlmul)));
 
                         // Invalid conversion
                         if (int'(csr_vtype_q.vsew) < int'(EW64) ||
@@ -1674,8 +1673,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                         ara_req.conversion_vs2 = OpQueueConversionSExt8;
                         ara_req.eew_vs2        = eew_q[insn.varith_type.rs2];
                         ara_req.cvt_resize     = CVT_WIDE;
-                        ara_req.emul           = csr_vtype_q.vlmul;
-                        lmul_vs2               = prev_lmul(prev_lmul(prev_lmul(csr_vtype_q.vlmul)));
 
                         // Invalid conversion
                         if (int'(csr_vtype_q.vsew) < int'(EW64) ||
@@ -1686,8 +1683,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                         ara_req.conversion_vs2 = OpQueueConversionZExt4;
                         ara_req.eew_vs2        = prev_prev_ew(csr_vtype_q.vsew);
                         ara_req.cvt_resize     = CVT_WIDE;
-                        ara_req.emul           = csr_vtype_q.vlmul;
-                        lmul_vs2               = prev_lmul(prev_lmul(csr_vtype_q.vlmul));
 
                         // Invalid conversion
                         if (int'(csr_vtype_q.vsew) < int'(EW32) ||
@@ -1697,8 +1692,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                         ara_req.conversion_vs2 = OpQueueConversionSExt4;
                         ara_req.eew_vs2        = prev_prev_ew(csr_vtype_q.vsew);
                         ara_req.cvt_resize     = CVT_WIDE;
-                        ara_req.emul           = csr_vtype_q.vlmul;
-                        lmul_vs2               = prev_lmul(prev_lmul(csr_vtype_q.vlmul));
 
                         // Invalid conversion
                         if (int'(csr_vtype_q.vsew) < int'(EW32) ||
@@ -1708,8 +1701,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                         ara_req.conversion_vs2 = OpQueueConversionZExt2;
                         ara_req.eew_vs2        = csr_vtype_q.vsew.prev();
                         ara_req.cvt_resize     = CVT_WIDE;
-                        ara_req.emul           = csr_vtype_q.vlmul;
-                        lmul_vs2               = prev_lmul(csr_vtype_q.vlmul);
 
                         // Invalid conversion
                         if (int'(csr_vtype_q.vsew) < int'(EW16) || int'(csr_vtype_q.vlmul) inside {LMUL_1_8})
@@ -1719,8 +1710,6 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                         ara_req.conversion_vs2 = OpQueueConversionSExt2;
                         ara_req.eew_vs2        = csr_vtype_q.vsew.prev();
                         ara_req.cvt_resize     = CVT_WIDE;
-                        ara_req.emul           = csr_vtype_q.vlmul;
-                        lmul_vs2               = prev_lmul(csr_vtype_q.vlmul);
 
                         // Invalid conversion
                         if (int'(csr_vtype_q.vsew) < int'(EW16) || int'(csr_vtype_q.vlmul) inside {LMUL_1_8})
@@ -1897,15 +1886,15 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                     default:;
                   endcase
                   unique case (lmul_vs2)
-                    LMUL_2: if ((insn.varith_type.rs2 & 5'b00001) != 5'b00000) illegal_insn |= ara_req.use_vs2;
-                    LMUL_4: if ((insn.varith_type.rs2 & 5'b00011) != 5'b00000) illegal_insn |= ara_req.use_vs2;
-                    LMUL_8: if ((insn.varith_type.rs2 & 5'b00111) != 5'b00000) illegal_insn |= ara_req.use_vs2;
+                    LMUL_2: if ((insn.varith_type.rs2 & 5'b00001) != 5'b00000) illegal_insn = ara_req.use_vs2;
+                    LMUL_4: if ((insn.varith_type.rs2 & 5'b00011) != 5'b00000) illegal_insn = ara_req.use_vs2;
+                    LMUL_8: if ((insn.varith_type.rs2 & 5'b00111) != 5'b00000) illegal_insn = ara_req.use_vs2;
                     default:;
                   endcase
                   unique case (lmul_vs1)
-                    LMUL_2: if ((insn.varith_type.rs1 & 5'b00001) != 5'b00000) illegal_insn |= ara_req.use_vs1;
-                    LMUL_4: if ((insn.varith_type.rs1 & 5'b00011) != 5'b00000) illegal_insn |= ara_req.use_vs1;
-                    LMUL_8: if ((insn.varith_type.rs1 & 5'b00111) != 5'b00000) illegal_insn |= ara_req.use_vs1;
+                    LMUL_2: if ((insn.varith_type.rs1 & 5'b00001) != 5'b00000) illegal_insn = ara_req.use_vs1;
+                    LMUL_4: if ((insn.varith_type.rs1 & 5'b00011) != 5'b00000) illegal_insn = ara_req.use_vs1;
+                    LMUL_8: if ((insn.varith_type.rs1 & 5'b00111) != 5'b00000) illegal_insn = ara_req.use_vs1;
                     default:;
                   endcase
                 end
@@ -2139,9 +2128,9 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                     default:;
                   endcase
                   unique case (lmul_vs2)
-                    LMUL_2: if ((insn.varith_type.rs2 & 5'b00001) != 5'b00000) illegal_insn |= ara_req.use_vs2;
-                    LMUL_4: if ((insn.varith_type.rs2 & 5'b00011) != 5'b00000) illegal_insn |= ara_req.use_vs2;
-                    LMUL_8: if ((insn.varith_type.rs2 & 5'b00111) != 5'b00000) illegal_insn |= ara_req.use_vs2;
+                    LMUL_2: if ((insn.varith_type.rs2 & 5'b00001) != 5'b00000) illegal_insn = ara_req.use_vs2;
+                    LMUL_4: if ((insn.varith_type.rs2 & 5'b00011) != 5'b00000) illegal_insn = ara_req.use_vs2;
+                    LMUL_8: if ((insn.varith_type.rs2 & 5'b00111) != 5'b00000) illegal_insn = ara_req.use_vs2;
                     default:;
                   endcase
                 end
@@ -2557,16 +2546,16 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                       default:;
                     endcase
                     unique case (lmul_vs2)
-                      LMUL_2   : if ((insn.varith_type.rs2 & 5'b00001) != 5'b00000) illegal_insn |= ara_req.use_vs2;
-                      LMUL_4   : if ((insn.varith_type.rs2 & 5'b00011) != 5'b00000) illegal_insn |= ara_req.use_vs2;
-                      LMUL_8   : if ((insn.varith_type.rs2 & 5'b00111) != 5'b00000) illegal_insn |= ara_req.use_vs2;
+                      LMUL_2   : if ((insn.varith_type.rs2 & 5'b00001) != 5'b00000) illegal_insn = ara_req.use_vs2;
+                      LMUL_4   : if ((insn.varith_type.rs2 & 5'b00011) != 5'b00000) illegal_insn = ara_req.use_vs2;
+                      LMUL_8   : if ((insn.varith_type.rs2 & 5'b00111) != 5'b00000) illegal_insn = ara_req.use_vs2;
                       LMUL_RSVD: illegal_insn = 1'b1;
                       default:;
                     endcase
                     unique case (lmul_vs1)
-                      LMUL_2   : if ((insn.varith_type.rs1 & 5'b00001) != 5'b00000) illegal_insn |= ara_req.use_vs1;
-                      LMUL_4   : if ((insn.varith_type.rs1 & 5'b00011) != 5'b00000) illegal_insn |= ara_req.use_vs1;
-                      LMUL_8   : if ((insn.varith_type.rs1 & 5'b00111) != 5'b00000) illegal_insn |= ara_req.use_vs1;
+                      LMUL_2   : if ((insn.varith_type.rs1 & 5'b00001) != 5'b00000) illegal_insn = ara_req.use_vs1;
+                      LMUL_4   : if ((insn.varith_type.rs1 & 5'b00011) != 5'b00000) illegal_insn = ara_req.use_vs1;
+                      LMUL_8   : if ((insn.varith_type.rs1 & 5'b00111) != 5'b00000) illegal_insn = ara_req.use_vs1;
                       LMUL_RSVD: illegal_insn = 1'b1;
                       default:;
                     endcase
@@ -2851,9 +2840,9 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                       default:;
                     endcase
                     unique case (lmul_vs2)
-                      LMUL_2   : if ((insn.varith_type.rs2 & 5'b00001) != 5'b00000) illegal_insn |= ara_req.use_vs2;
-                      LMUL_4   : if ((insn.varith_type.rs2 & 5'b00011) != 5'b00000) illegal_insn |= ara_req.use_vs2;
-                      LMUL_8   : if ((insn.varith_type.rs2 & 5'b00111) != 5'b00000) illegal_insn |= ara_req.use_vs2;
+                      LMUL_2   : if ((insn.varith_type.rs2 & 5'b00001) != 5'b00000) illegal_insn = ara_req.use_vs2;
+                      LMUL_4   : if ((insn.varith_type.rs2 & 5'b00011) != 5'b00000) illegal_insn = ara_req.use_vs2;
+                      LMUL_8   : if ((insn.varith_type.rs2 & 5'b00111) != 5'b00000) illegal_insn = ara_req.use_vs2;
                       LMUL_RSVD: illegal_insn = 1'b1;
                       default:;
                     endcase
@@ -2890,7 +2879,7 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
 
           riscv::OpcodeLoadFp: begin
             // Instruction is of one of the RVV types
-            automatic rvv_instruction_t insn = rvv_instruction_t'(instr.instr);
+            automatic rvv_instruction_t insn = rvv_instruction_t'(acc_req_i.insn.instr);
 
             // The instruction is a load
             is_vload = 1'b1;
@@ -3137,7 +3126,7 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
 
           riscv::OpcodeStoreFp: begin
             // Instruction is of one of the RVV types
-            automatic rvv_instruction_t insn = rvv_instruction_t'(instr.instr);
+            automatic rvv_instruction_t insn = rvv_instruction_t'(acc_req_i.insn.instr);
 
             // The instruction is a store
             is_vstore = 1'b1;
@@ -3378,16 +3367,15 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
             if (state_qq != WAIT_IDLE) begin
               state_d = WAIT_IDLE;
               acc_resp_o.req_ready = 1'b0;
-              is_config = 1'b1;
             end else begin
               // These always respond at the same cycle
               acc_resp_o.resp_valid = 1'b1;
               is_config        = 1'b1;
 
-              unique case (instr.itype.funct3)
+              unique case (acc_req_i.insn.itype.funct3)
                 3'b001: begin // csrrw
                   // Decode the CSR.
-                  case (riscv::csr_addr_t'(instr.itype.imm))
+                  case (riscv::csr_addr_t'(acc_req_i.insn.itype.imm))
                     // Only vstart can be written with CSR instructions.
                     riscv::CSR_VSTART: begin
                       csr_vstart_d          = acc_req_i.rs1;
@@ -3411,24 +3399,24 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                 end
                 3'b010: begin // csrrs
                   // Decode the CSR.
-                  case (riscv::csr_addr_t'(instr.itype.imm))
+                  case (riscv::csr_addr_t'(acc_req_i.insn.itype.imm))
                     riscv::CSR_VSTART: begin
                       csr_vstart_d          = csr_vstart_q | vlen_t'(acc_req_i.rs1);
                       acc_resp_o.result = csr_vstart_q;
                     end
                     riscv::CSR_VTYPE: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = xlen_vtype(csr_vtype_q);
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = xlen_vtype(csr_vtype_q);
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VL: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = csr_vl_q;
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = csr_vl_q;
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VLENB: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = VLENB;
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = VLENB;
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VXRM: begin
@@ -3449,24 +3437,24 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                 end
                 3'b011: begin // csrrc
                   // Decode the CSR.
-                  case (riscv::csr_addr_t'(instr.itype.imm))
+                  case (riscv::csr_addr_t'(acc_req_i.insn.itype.imm))
                     riscv::CSR_VSTART: begin
                       csr_vstart_d          = csr_vstart_q & ~vlen_t'(acc_req_i.rs1);
                       acc_resp_o.result = csr_vstart_q;
                     end
                     riscv::CSR_VTYPE: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = xlen_vtype(csr_vtype_q);
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = xlen_vtype(csr_vtype_q);
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VL: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = csr_vl_q;
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = csr_vl_q;
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VLENB: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = VLENB;
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = VLENB;
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VXSAT: begin
@@ -3487,7 +3475,7 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                 end
                 3'b101: begin // csrrwi
                   // Decode the CSR.
-                  case (riscv::csr_addr_t'(instr.itype.imm))
+                  case (riscv::csr_addr_t'(acc_req_i.insn.itype.imm))
                     // Only vstart can be written with CSR instructions.
                     riscv::CSR_VSTART: begin
                       csr_vstart_d          = vlen_t'(acc_req_i.rs1);
@@ -3512,24 +3500,24 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                 end
                 3'b110: begin // csrrsi
                   // Decode the CSR.
-                  case (riscv::csr_addr_t'(instr.itype.imm))
+                  case (riscv::csr_addr_t'(acc_req_i.insn.itype.imm))
                     riscv::CSR_VSTART: begin
                       csr_vstart_d          = csr_vstart_q | vlen_t'(acc_req_i.rs1);
                       acc_resp_o.result = csr_vstart_q;
                     end
                     riscv::CSR_VTYPE: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = xlen_vtype(csr_vtype_q);
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = xlen_vtype(csr_vtype_q);
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VL: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = csr_vl_q;
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = csr_vl_q;
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VLENB: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = VLENB;
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = VLENB;
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VXSAT: begin
@@ -3553,24 +3541,24 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                 end
                 3'b111: begin // csrrci
                   // Decode the CSR.
-                  unique case (riscv::csr_addr_t'(instr.itype.imm))
+                  unique case (riscv::csr_addr_t'(acc_req_i.insn.itype.imm))
                     riscv::CSR_VSTART: begin
                       csr_vstart_d          = csr_vstart_q & ~vlen_t'(acc_req_i.rs1);
                       acc_resp_o.result = csr_vstart_q;
                     end
                     riscv::CSR_VTYPE: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = xlen_vtype(csr_vtype_q);
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = xlen_vtype(csr_vtype_q);
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VL: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = csr_vl_q;
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = csr_vl_q;
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VLENB: begin
                       // Only reads are allowed
-                      if (instr.itype.rs1 == '0) acc_resp_o.result = VLENB;
+                      if (acc_req_i.insn.itype.rs1 == '0) acc_resp_o.result = VLENB;
                       else illegal_insn = 1'b1;
                     end
                     riscv::CSR_VXSAT: begin
@@ -3594,7 +3582,7 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
                   // Trigger an illegal instruction
                   illegal_insn = 1'b1;
                 end
-              endcase // instr.itype.funct3
+              endcase // acc_req_i.insn.itype.funct3
             end
           end
 
@@ -3621,24 +3609,22 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
         acc_resp_o.resp_valid      = 1'b1;
         acc_resp_o.exception.valid = 1'b1;
         acc_resp_o.exception.cause = riscv::ILLEGAL_INSTR;
-        acc_resp_o.exception.tval  = instr;
+        acc_resp_o.exception.tval  = acc_req_i.insn;
       end
 
       // Check if we need to reshuffle our vector registers involved in the operation
       // This operation is costly when occurs, so avoid it if possible
       if ( ara_req_valid && !acc_resp_o.exception.valid ) begin
-        automatic rvv_instruction_t insn = rvv_instruction_t'(instr.instr);
+        automatic rvv_instruction_t insn = rvv_instruction_t'(acc_req_i.insn.instr);
 
         // Is the instruction an in-lane one and could it be subject to reshuffling?
         in_lane_op = ara_req.op inside {[VADD:VMERGE]} || ara_req.op inside {[VREDSUM:VMSBC]} ||
-                     ara_req.op inside {[VMANDNOT:VMXNOR]} || ara_req.op inside {[VMVXS:VSLIDEDOWN]};
+                     ara_req.op inside {[VMANDNOT:VMXNOR]} || ara_req.op inside {VSLIDEUP, VSLIDEDOWN};
         // Annotate which registers need a reshuffle -> |vs1|vs2|vd|
         // Optimization: reshuffle vs1 and vs2 only if the operation is strictly in-lane
         // Optimization: reshuffle vd only if we are not overwriting the whole vector register!
         // During a vstore, if vstart > 0, reshuffle immediately not to complicate operand fetch stage
-        // During a vstore with EMUL > 1, reshuffle immediately if the register group's EEW is not the
-        // same for every reg.
-        reshuffle_req_d = {ara_req.use_vs1 && (ara_req.eew_vs1    != eew_q[ara_req.vs1]) && eew_valid_q[ara_req.vs1] && (in_lane_op || (is_vstore && ((csr_vstart_q != '0) || !is_same_eew))),
+        reshuffle_req_d = {ara_req.use_vs1 && (ara_req.eew_vs1    != eew_q[ara_req.vs1]) && eew_valid_q[ara_req.vs1] && (in_lane_op || (is_vstore && (csr_vstart_q != '0))),
                            ara_req.use_vs2 && (ara_req.eew_vs2    != eew_q[ara_req.vs2]) && eew_valid_q[ara_req.vs2] && in_lane_op,
                            ara_req.use_vd  && (ara_req.vtype.vsew != eew_q[ara_req.vd ]) && eew_valid_q[ara_req.vd ] && !(csr_vstart_q == 0 && (csr_vl_q == ((VLENB << ara_req.emul[1:0]) >> ara_req.vtype.vsew)))};
         // Mask out requests if they refer to the same register!
@@ -3672,7 +3658,7 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
       // Reshuffle if at least one of the three registers needs a reshuffle
       if (|reshuffle_req_d) begin
         // Instruction is of one of the RVV types
-        automatic rvv_instruction_t insn = rvv_instruction_t'(instr.instr);
+        automatic rvv_instruction_t insn = rvv_instruction_t'(acc_req_i.insn.instr);
 
         // Stall the interface, and inject a reshuffling instruction
         acc_resp_o.req_ready  = 1'b0;
@@ -3754,7 +3740,7 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
     // * CSR operations are not considered vector instructions
     if ( acc_resp_o.resp_valid
           & !acc_resp_o.exception.valid
-          & (instr.itype.opcode != riscv::OpcodeSystem)
+          & (acc_req_i.insn.itype.opcode != riscv::OpcodeSystem)
         ) begin
       csr_vstart_d = '0;
     end
@@ -3764,40 +3750,12 @@ module ara_dispatcher import ara_pkg::*; import rvv_pkg::*; #(
 
     // The token must change at every new instruction
     ara_req.token = (ara_req_valid_o && ara_req_ready_i) ? ~ara_req_o.token : ara_req_o.token;
+    
+    /*if (is_decoding && !acc_resp_o.exception.valid) begin
+        // This existing display statement is perfect for seeing the decoded operation
+        $display("[%0t ns] [ARA_DISPATCHER] >>> Decoding Insn: %h, Dispatched OP: %s",
+                 $time, acc_req_i.insn.instr, ara_req.op.name());
+    end*/
   end: p_decoder
-
-  // Check if register groups have all their registers with the same EEW encoding
-  always_comb begin
-    logic [15:0] same_eew_m2;
-    logic [7:0]  same_eew_m4;
-    logic [3:0]  same_eew_m8;
-    logic [3:0]  same_eew_by_lmul;
-
-    // LMUL = 2: group of 2 registers
-    for (int i = 0; i < 16; i++) begin
-      same_eew_m2[i] = (eew_q[2*i] == eew_q[2*i+1]);
-    end
-
-    // LMUL = 4: group of 4 registers (2 LMUL=2 groups + mid-pair check)
-    for (int i = 0; i < 8; i++) begin
-      same_eew_m4[i] = (eew_q[4*i+1] == eew_q[4*i+2]) &&
-                       (same_eew_m2[2*i] && same_eew_m2[2*i+1]);
-    end
-
-    // LMUL = 8: group of 8 registers (2 LMUL=4 groups + mid-pair check)
-    for (int i = 0; i < 4; i++) begin
-      same_eew_m8[i] = (eew_q[8*i+3] == eew_q[8*i+4]) &&
-                       (same_eew_m4[2*i] && same_eew_m4[2*i+1]);
-    end
-
-    // Final selection per LMUL
-    same_eew_by_lmul[LMUL_1] = 1'b1; // always same EEW with 1 register
-    same_eew_by_lmul[LMUL_2] = same_eew_m2[ara_req.vs1[4:1]];
-    same_eew_by_lmul[LMUL_4] = same_eew_m4[ara_req.vs1[4:2]];
-    same_eew_by_lmul[LMUL_8] = same_eew_m8[ara_req.vs1[4:3]];
-
-    // If EMUL is fractional (emul[2] == 1), EEW is considered uniform
-    is_same_eew = same_eew_by_lmul[ara_req.emul[1:0]] | ara_req.emul[2];
-  end
 
 endmodule : ara_dispatcher

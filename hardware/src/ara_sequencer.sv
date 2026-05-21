@@ -9,17 +9,16 @@
 
 module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::idx_width; #(
     // RVV Parameters
-    parameter  int unsigned NrLanes     = 1,          // Number of parallel vector lanes
-    parameter  int unsigned VLEN        = 0,
-    parameter  type         ara_req_t   = logic,
-    parameter  type         ara_resp_t  = logic,
-    parameter  type         pe_req_t    = logic,
-    parameter  type         pe_resp_t   = logic,
-    parameter  type         exception_t = logic,
+    parameter  int unsigned NrLanes    = 1,          // Number of parallel vector lanes
+    parameter  int unsigned VLEN       = 0,
+    parameter  type         ara_req_t  = logic,
+    parameter  type         ara_resp_t = logic,
+    parameter  type         pe_req_t   = logic,
+    parameter  type         pe_resp_t  = logic,
     // Dependant parameters. DO NOT CHANGE!
     // Ara has NrLanes + 3 processing elements: each one of the lanes, the vector load unit, the
     // vector store unit, the slide unit, and the mask unit.
-    localparam int unsigned NrPEs   = NrLanes + 4,
+    localparam int unsigned  NrPEs   = NrLanes + 4,
     localparam type         vlen_t  = logic[$clog2(VLEN+1)-1:0]
   ) (
     input  logic                            clk_i,
@@ -39,6 +38,8 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
     input  pe_resp_t            [NrPEs-1:0] pe_resp_i,
     input  logic                            alu_vinsn_done_i,
     input  logic                            mfpu_vinsn_done_i,
+    input  logic                            tmac_vinsn_done_i,
+    input  logic                            custom_pe_vinsn_done_i,
     // Interface with the operand requesters
     output logic [NrVInsn-1:0][NrVInsn-1:0] global_hazard_table_o,
     // Only the slide unit can answer with a scalar response
@@ -47,7 +48,7 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
     output logic                            pe_scalar_resp_ready_o,
     // Interface with the Address Generation
     input  logic                            addrgen_ack_i,
-    input  exception_t                      addrgen_exception_i,
+    input  ariane_pkg::exception_t          addrgen_exception_i,
     input  vlen_t                           addrgen_exception_vstart_i,
     input  logic                            addrgen_fof_exception_i,
     // Interface with the store unit
@@ -241,10 +242,13 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
     unique case (op) inside
       [VADD:VWREDSUM]      : vfu = VFU_Alu;
       [VMUL:VFWREDOSUM]    : vfu = VFU_MFpu;
+      [VTMUL1:VTMUL4]      : vfu = VFU_Tmac;
       [VMFEQ:VCOMPRESS]    : vfu = VFU_MaskUnit;
       [VLE:VLXE]           : vfu = VFU_LoadUnit;
       [VSE:VSXE]           : vfu = VFU_StoreUnit;
       [VSLIDEUP:VSLIDEDOWN]: vfu = VFU_SlideUnit;
+      VCUSTOM_MAC          : vfu = VFU_CustomPE;
+      VBITLINEAR           : vfu = VFU_MFpu;
       [VMVXS:VFMVFS]       : vfu = VFU_None;
       default              : vfu = VFU_None;
     endcase
@@ -268,6 +272,9 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
       [VMUL:VFCVTFF]:
         for (int i = 0; i < NrVFUs; i++)
           if (i == VFU_MFpu) target_vfus[i] = 1'b1;
+      [VTMUL1:VTMUL4]:
+      for (int i = 0; i < NrVFUs; i++)
+        if (i == VFU_Tmac) target_vfus[i] = 1'b1;
       [VMSEQ:VMXNOR]:
         for (int i = 0; i < NrVFUs; i++)
           if (i == VFU_Alu || i == VFU_MaskUnit) target_vfus[i] = 1'b1;
@@ -283,6 +290,12 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
       [VSE:VSXE]:
         for (int i = 0; i < NrVFUs; i++)
           if (i == VFU_StoreUnit) target_vfus[i] = 1'b1;
+      VCUSTOM_MAC:
+        for (int i = 0; i < NrVFUs; i++)
+          if (i == VFU_CustomPE) target_vfus[i] = 1'b1;
+      VBITLINEAR:
+        for (int i = 0; i < NrVFUs; i++)
+          if (i == VFU_MFpu) target_vfus[i] = 1'b1;
       [VSLIDEUP:VSLIDEDOWN]:
         for (int i = 0; i < NrVFUs; i++)
           if (i == VFU_SlideUnit) target_vfus[i] = 1'b1;
@@ -300,9 +313,11 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
   localparam int unsigned InsnQueueDepth [NrVFUs] = '{
     ValuInsnQueueDepth,
     MfpuInsnQueueDepth,
+    TmacInsnQueueDepth,
     SlduInsnQueueDepth,
     MaskuInsnQueueDepth,
     VlduInsnQueueDepth,
+    CustomPEInsnQueueDepth,
     VstuInsnQueueDepth,
     NoneInsnQueueDepth
   };
@@ -497,7 +512,9 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
                 VFU_StoreUnit: pe_vinsn_running_d[NrLanes + OffsetStore][vinsn_id_n] = 1'b1;
                 VFU_SlideUnit: pe_vinsn_running_d[NrLanes + OffsetSlide][vinsn_id_n] = 1'b1;
                 VFU_MaskUnit : pe_vinsn_running_d[NrLanes + OffsetMask][vinsn_id_n]  = 1'b1;
+                VFU_CustomPE : pe_vinsn_running_d[NrLanes + OffsetCustomPE][vinsn_id_n] = 1'b1;
                 VFU_None     : ;
+
                 default: for (int l = 0; l < NrLanes; l++)
                     // Instruction is running on the lanes
                     pe_vinsn_running_d[l][vinsn_id_n] = 1'b1;
@@ -515,6 +532,10 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
 
               // Issue the instruction
               pe_req_valid_d = 1'b1;
+                      /*if (pe_req_valid_d) begin
+          $display("[%0t ns] [ARA_SEQUENCER] >>> Dispatching Insn ID: %d, OP: %s to VFU: %s",
+                 $time, pe_req_d.id, pe_req_d.op.name(), pe_req_d.vfu.name());
+        end*/
 
               // Mark that this vector instruction is writing to vector vd
               if (ara_req_i.use_vd) write_list_d[ara_req_i.vd] = '{vid: vinsn_id_n, valid: 1'b1};
@@ -523,6 +544,7 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
               if (ara_req_i.use_vs1) read_list_d[ara_req_i.vs1] = '{vid: vinsn_id_n, valid: 1'b1};
               if (ara_req_i.use_vs2) read_list_d[ara_req_i.vs2] = '{vid: vinsn_id_n, valid: 1'b1};
               if (!ara_req_i.vm) read_list_d[VMASK]             = '{vid: vinsn_id_n, valid: 1'b1};
+              
             end
           end else ara_req_ready_o = 1'b0; // Wait until the PEs are ready
         end
@@ -570,6 +592,11 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
           ara_resp_o.resp        = pe_scalar_resp_i;
           pe_scalar_resp_ready_o = pe_scalar_resp_valid_i & ~running_mask_insn_q;
         end
+
+        /*if (pe_req_valid_d) begin
+          $display("[%0t ns] [ARA_SEQUENCER] >>> Dispatching Insn ID: %d, OP: %s to VFU: %s",
+                 $time, pe_req_d.id, pe_req_d.op.name(), pe_req_d.vfu.name());
+        end*/
       end
     endcase
 
@@ -639,6 +666,8 @@ module ara_sequencer import ara_pkg::*; import rvv_pkg::*; import cf_math_pkg::i
   // ALU and MFPU has different signal sources
   assign insn_queue_done[VFU_Alu]       = alu_vinsn_done_i;
   assign insn_queue_done[VFU_MFpu]      = mfpu_vinsn_done_i;
+  assign insn_queue_done[VFU_CustomPE]  = custom_pe_vinsn_done_i;
+  assign insn_queue_done[VFU_Tmac]      = tmac_vinsn_done_i;
   assign insn_queue_done[VFU_LoadUnit]  = |pe_resp_i[NrLanes+OffsetLoad].vinsn_done;
   assign insn_queue_done[VFU_StoreUnit] = |pe_resp_i[NrLanes+OffsetStore].vinsn_done;
   assign insn_queue_done[VFU_MaskUnit]  = |pe_resp_i[NrLanes+OffsetMask].vinsn_done;

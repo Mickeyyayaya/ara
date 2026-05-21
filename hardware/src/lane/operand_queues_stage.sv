@@ -40,6 +40,10 @@ module operand_queues_stage import ara_pkg::*; import rvv_pkg::*; import cf_math
     output elen_t              [2:0]                 mfpu_operand_o,
     output logic               [2:0]                 mfpu_operand_valid_o,
     input  logic               [2:0]                 mfpu_operand_ready_i,
+    // Tmac
+    output elen_t              [2:0]                 tmac_operand_o,
+    output logic               [2:0]                 tmac_operand_valid_o,
+    input  logic               [2:0]                 tmac_operand_ready_i,
     // Store unit
     output elen_t                                    stu_operand_o,
     output logic                                     stu_operand_valid_o,
@@ -52,7 +56,11 @@ module operand_queues_stage import ara_pkg::*; import rvv_pkg::*; import cf_math
     // Mask unit
     output elen_t              [1:0]                 mask_operand_o,
     output logic               [1:0]                 mask_operand_valid_o,
-    input  logic               [1:0]                 mask_operand_ready_i
+    input  logic               [1:0]                 mask_operand_ready_i,
+    // custompe unit
+    output elen_t              [1:0]                 custom_pe_operand_o,
+    output logic               [1:0]                 custom_pe_operand_valid_o,
+    input  logic               [1:0]                 custom_pe_operand_ready_i
   );
 
   `include "common_cells/registers.svh"
@@ -212,6 +220,103 @@ module operand_queues_stage import ara_pkg::*; import rvv_pkg::*; import cf_math
     .operand_ready_i          (mfpu_operand_ready_i[2]           )
   );
 
+
+  /////////////////
+  //  T-MAC Unit //
+  /////////////////
+
+  operand_queue #(
+    .CmdBufDepth        (TmacInsnQueueDepth),
+    .DataBufDepth       (5),
+    .FPUSupport         (FPUSupportNone),
+    .NrLanes            (NrLanes),
+    .VLEN               (VLEN),
+    .SupportIntExt2     (1'b1),
+    .SupportIntExt4     (1'b1),
+    .SupportIntExt8     (1'b1),
+    .SupportReduct      (1'b0),
+    .SupportNtrVal      (1'b0),
+    .operand_queue_cmd_t(operand_queue_cmd_t)
+  ) i_operand_queue_tmac_a (
+    .clk_i                    (clk_i),
+    .rst_ni                   (rst_ni),
+    .flush_i                  (1'b0),
+    .lane_id_i                (lane_id_i),
+    .operand_queue_cmd_i      (operand_queue_cmd_i[TmacA]),
+    .operand_queue_cmd_valid_i(operand_queue_cmd_valid_i[TmacA]),
+    .cmd_pop_o                (/* Unused */),
+    .operand_i                (operand_i[TmacA]),
+    .operand_valid_i          (operand_valid_i[TmacA]),
+    .operand_issued_i         (operand_issued_i[TmacA]),
+    .operand_queue_ready_o    (operand_queue_ready_o[TmacA]),
+    .operand_o                (tmac_operand_o[0]),
+    .operand_target_fu_o      (/* Unused */),
+    .operand_valid_o          (tmac_operand_valid_o[0]),
+    .operand_ready_i          (tmac_operand_ready_i[0])
+  );
+
+
+  operand_queue #(
+    .CmdBufDepth        (TmacInsnQueueDepth),
+    .DataBufDepth       (5),
+    .FPUSupport         (FPUSupportNone),
+    .NrLanes            (NrLanes),
+    .VLEN               (VLEN),
+    .SupportIntExt2     (1'b1),
+    .SupportIntExt4     (1'b1),
+    .SupportIntExt8     (1'b1),
+    .SupportReduct      (1'b0),
+    .SupportNtrVal      (1'b0),
+    .operand_queue_cmd_t(operand_queue_cmd_t)
+  ) i_operand_queue_tmac_b (
+    .clk_i                    (clk_i),
+    .rst_ni                   (rst_ni),
+    .flush_i                  (1'b0),
+    .lane_id_i                (lane_id_i),
+    .operand_queue_cmd_i      (operand_queue_cmd_i[TmacB]),
+    .operand_queue_cmd_valid_i(operand_queue_cmd_valid_i[TmacB]),
+    .cmd_pop_o                (/* Unused */),
+    .operand_i                (operand_i[TmacB]),
+    .operand_valid_i          (operand_valid_i[TmacB]),
+    .operand_issued_i         (operand_issued_i[TmacB]),
+    .operand_queue_ready_o    (operand_queue_ready_o[TmacB]),
+    .operand_o                (tmac_operand_o[1]),
+    .operand_target_fu_o      (/* Unused */),
+    .operand_valid_o          (tmac_operand_valid_o[1]),
+    .operand_ready_i          (tmac_operand_ready_i[1])
+  );
+
+
+  operand_queue #(
+    .CmdBufDepth        (TmacInsnQueueDepth),
+    .DataBufDepth       (5),
+    .FPUSupport         (FPUSupportNone),
+    .NrLanes            (NrLanes),
+    .VLEN               (VLEN),
+    .SupportIntExt2     (1'b1),
+    .SupportIntExt4     (1'b1),
+    .SupportIntExt8     (1'b1),
+    .SupportReduct      (1'b0),
+    .SupportNtrVal      (1'b0),
+    .operand_queue_cmd_t(operand_queue_cmd_t)
+  ) i_operand_queue_tmac_c (
+    .clk_i                    (clk_i),
+    .rst_ni                   (rst_ni),
+    .flush_i                  (1'b0),
+    .lane_id_i                (lane_id_i),
+    .operand_queue_cmd_i      (operand_queue_cmd_i[TmacC]),
+    .operand_queue_cmd_valid_i(operand_queue_cmd_valid_i[TmacC]),
+    .cmd_pop_o                (/* Unused */),
+    .operand_i                (operand_i[TmacC]),
+    .operand_valid_i          (operand_valid_i[TmacC]),
+    .operand_issued_i         (operand_issued_i[TmacC]),
+    .operand_queue_ready_o    (operand_queue_ready_o[TmacC]),
+    .operand_o                (tmac_operand_o[2]),
+    .operand_target_fu_o      (/* Unused */),
+    .operand_valid_o          (tmac_operand_valid_o[2]),
+    .operand_ready_i          (tmac_operand_ready_i[2])
+  );
+
   ///////////////////////
   //  Load/Store Unit  //
   ///////////////////////
@@ -328,8 +433,80 @@ module operand_queues_stage import ara_pkg::*; import rvv_pkg::*; import cf_math
     .operand_valid_o          (mask_operand_valid_o[0]         ),
     .operand_ready_i          (mask_operand_ready_i[0]         )
   );
+  
+
+  ///////////////////////
+  //  Custom PE Unit  //
+  ///////////////////////
+
+  // Custom PE Operand A (Activation)
+  operand_queue #(
+    .CmdBufDepth        (CustomPEInsnQueueDepth   ),
+    .DataBufDepth       (5                        ),
+    .FPUSupport         (FPUSupportNone           ),
+    .NrLanes            (NrLanes                  ),
+    .VLEN               (VLEN                     ),
+    .SupportIntExt2     (1'b1                     ),
+    .SupportIntExt4     (1'b1                     ),
+    .SupportIntExt8     (1'b1                     ),
+    .SupportReduct      (1'b0                     ),
+    .SupportNtrVal      (1'b0                     ),
+    .operand_queue_cmd_t(operand_queue_cmd_t      )
+  ) i_operand_queue_custom_pe_a (
+    .clk_i                    (clk_i                              ),
+    .rst_ni                   (rst_ni                             ),
+    .flush_i                  (1'b0                               ),
+    .lane_id_i                (lane_id_i                          ),
+    .operand_queue_cmd_i      (operand_queue_cmd_i[CustomPEA]     ),
+    .operand_queue_cmd_valid_i(operand_queue_cmd_valid_i[CustomPEA]),
+    .cmd_pop_o                (/* Unused */                       ),
+    .operand_i                (operand_i[CustomPEA]               ),
+    .operand_valid_i          (operand_valid_i[CustomPEA]         ),
+    .operand_issued_i         (operand_issued_i[CustomPEA]        ),
+    .operand_queue_ready_o    (operand_queue_ready_o[CustomPEA]   ),
+    .operand_o                (custom_pe_operand_o[0]             ),
+    .operand_target_fu_o      (/* Unused */                       ),
+    .operand_valid_o          (custom_pe_operand_valid_o[0]       ),
+    .operand_ready_i          (custom_pe_operand_ready_i[0]       )
+  );
+
+  // Custom PE Operand B (Weight)  
+  operand_queue #(
+    .CmdBufDepth        (CustomPEInsnQueueDepth   ),
+    .DataBufDepth       (5                        ),
+    .FPUSupport         (FPUSupportNone           ),
+    .NrLanes            (NrLanes                  ),
+    .VLEN               (VLEN                     ),
+    .SupportIntExt2     (1'b1                     ),
+    .SupportIntExt4     (1'b1                     ),
+    .SupportIntExt8     (1'b1                     ),
+    .SupportReduct      (1'b0                     ),
+    .SupportNtrVal      (1'b0                     ),
+    .operand_queue_cmd_t(operand_queue_cmd_t      )
+  ) i_operand_queue_custom_pe_b (
+    .clk_i                    (clk_i                              ),
+    .rst_ni                   (rst_ni                             ),
+    .flush_i                  (1'b0                               ),
+    .lane_id_i                (lane_id_i                          ),
+    .operand_queue_cmd_i      (operand_queue_cmd_i[CustomPEB]     ),
+    .operand_queue_cmd_valid_i(operand_queue_cmd_valid_i[CustomPEB]),
+    .cmd_pop_o                (/* Unused */                       ),
+    .operand_i                (operand_i[CustomPEB]               ),
+    .operand_valid_i          (operand_valid_i[CustomPEB]         ),
+    .operand_issued_i         (operand_issued_i[CustomPEB]        ),
+    .operand_queue_ready_o    (operand_queue_ready_o[CustomPEB]   ),
+    .operand_o                (custom_pe_operand_o[1]             ),
+    .operand_target_fu_o      (/* Unused */                       ),
+    .operand_valid_o          (custom_pe_operand_valid_o[1]       ),
+    .operand_ready_i          (custom_pe_operand_ready_i[1]       )
+  );
+  
 
   // Checks
   if (VrgatherOpQueueBufDepth % 2 != 0) $fatal(1, "Parameter VrgatherOpQueueBufDepth must be power of 2.");
+/*
+assign tmac_operand_o[2] = '0;
+assign tmac_operand_valid_o[2] = 1'b0;
+*/
 
 endmodule : operand_queues_stage

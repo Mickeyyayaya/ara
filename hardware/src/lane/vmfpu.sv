@@ -11,7 +11,6 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
   import cf_math_pkg::idx_width; #(
     parameter  int           unsigned NrLanes         = 0,
     parameter  int           unsigned VLEN            = 0,
-    parameter  config_pkg::cva6_cfg_t CVA6Cfg         = cva6_config_pkg::cva6_cfg,
     // Support for floating-point data types
     parameter  fpu_support_e          FPUSupport      = FPUSupportHalfSingleDouble,
     // External support for vfrec7, vfrsqrt7, rounding-toward-odd
@@ -193,11 +192,12 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
   //  Helper signals  //
   //////////////////////
 
-  logic vinsn_issue_mul, vinsn_issue_div, vinsn_issue_fpu;
+  logic vinsn_issue_mul, vinsn_issue_div, vinsn_issue_fpu, vinsn_issue_vbitlinear;
 
   assign vinsn_issue_mul = vinsn_issue_q.op inside {[VMUL:VSMUL]};
   assign vinsn_issue_div = vinsn_issue_q.op inside {[VDIVU:VREM]};
   assign vinsn_issue_fpu = vinsn_issue_q.op inside {[VFADD:VMFGE]};
+  assign vinsn_issue_vbitlinear = vinsn_issue_q.op == VBITLINEAR;
 
   // This function returns the latency of the FPU operation,
   // depending on the sew as well
@@ -208,6 +208,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
       [VFREDMIN:VFREDMAX]:    fpu_latency = LatFNonComp;
       [VFCVTXUF:VFCVTFF]:     fpu_latency = LatFConv;
       [VFMIN:VFSGNJX]:        fpu_latency = LatFNonComp;
+      VBITLINEAR:             fpu_latency = LatFBitlinear;
       default: begin
         case (sew)
           EW64:    fpu_latency = LatFCompEW64;
@@ -217,6 +218,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
         endcase
       end
     endcase
+    //$display("FPU latency for %s with SEW %s is %0d", ara_op_e'(op), vew_e'(sew), fpu_latency);
   endfunction: fpu_latency
 
   //////////////////////
@@ -238,6 +240,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
       EW8 : scalar_op = {8{vinsn_issue_q.scalar_op[ 7:0]}};
       default:;
     endcase
+    //$display("[MFPU-DEBUG] Scalar operand for %s is %h", vinsn_issue_q.op.name(), scalar_op);
   end
 
   /////////////////////
@@ -292,6 +295,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
   // Clock-gate for the multipliers
   logic clkgate_en_d, clkgate_en_q, clk_i_gated;
 
+
   tc_clk_gating i_simd_mul_manual_clk_gate (
     .clk_i     (clk_i       ),
     .en_i      (clkgate_en_q),
@@ -332,6 +336,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
 
   // Enable if the next stage is ready
   assign gate_ff_en  = vmul_simd_in_ready[vinsn_processing_q.vtype.vsew];
+  //$display(gate_ff_en, " vmul_simd_in_ready[%0d] = %0d", vinsn_processing_q.vtype.vsew, vmul_simd_in_ready[vinsn_processing_q.vtype.vsew]);
   // Flush if the next stage is clear but there is no valid input
   assign gate_ff_clr = vmul_simd_in_ready[vinsn_processing_q.vtype.vsew] &
                       ~vmul_simd_in_valid[vinsn_issue_q.vtype.vsew];
@@ -543,9 +548,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
   // committed.
   strb_t vdiv_mask;
 
-  simd_div # (
-    .CVA6Cfg(CVA6Cfg)
-  ) i_simd_div (
+  simd_div i_simd_div (
     .clk_i      (clk_i                                                      ),
     .rst_ni     (rst_ni                                                     ),
     .operand_a_i(mfpu_operand_i[1]                                          ),
@@ -561,6 +564,11 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
     .ready_i    (vdiv_out_ready                                             ),
     .valid_o    (vdiv_out_valid                                             )
   );
+
+  logic  vbitlinear_in_valid, vbitlinear_out_valid, vbitlinear_in_ready, vbitlinear_out_ready;
+  elen_t vbitlinear_result;
+  strb_t vbitlinear_mask;
+
 
   //////////////////
   //  Reductions  //
@@ -871,7 +879,6 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
     // Don't compress classify result
     localparam int unsigned TrueSIMDClass  = 1;
     localparam int unsigned EnableSIMDMask = 1;
-    localparam fpnew_pkg::divsqrt_unit_t DivSqrtSel = fpnew_pkg::PULP;
 
     operation_e fp_op;
     logic fp_opmod;
@@ -1069,7 +1076,6 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
     assign vfpu_operands[0] = operand_a;
     assign vfpu_operands[1] = operand_b;
     assign vfpu_operands[2] = operand_c;
-
     // Do not raise exceptions on inactive elements
     localparam FPULanes = FPUSupport == FPUSupportNone ?
       1 :
@@ -1087,7 +1093,6 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
     fpnew_top #(
       .Features      (FPUFeatures      ),
       .Implementation(FPUImplementation),
-      .DivSqrtSel    (DivSqrtSel       ),
       .TagType       (strb_t           ),
       .TrueSIMDClass (TrueSIMDClass    ),
       .EnableSIMDMask(EnableSIMDMask   )
@@ -1096,7 +1101,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
       .rst_ni        (rst_ni         ),
       .hart_id_i     ('0             ),
       .flush_i       (1'b0           ),
-      .rnd_mode_i    (fp_rm          ),
+      .rnd_mode_i    (fp_rm          ), 
       .op_i          (fp_op          ),
       .op_mod_i      (fp_opmod       ),
       .vectorial_op_i(1'b1           ),
@@ -1116,6 +1121,10 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
       .busy_o        (/* Unused */   )
     );
 
+    
+
+
+    
     ////////////////////////
     // VFREC7 & VFRSQRT7 //
     ///////////////////////
@@ -1396,11 +1405,13 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
     vmul_in_valid = 1'b0;
     vdiv_in_valid = 1'b0;
     vfpu_in_valid = 1'b0;
+    vbitlinear_in_valid = 1'b0;
 
     // If the result queue is not full, it is ready to accept a result
     vmul_out_ready = ~result_queue_full && (vinsn_processing_q.op inside {[VMUL:VSMUL]});
     vdiv_out_ready = ~result_queue_full && (vinsn_processing_q.op inside {[VDIVU:VREM]});
     vfpu_out_ready = ~result_queue_full && (vinsn_processing_q.op inside {[VFADD:VMFGE]});
+    vbitlinear_out_ready = ~result_queue_full && (vinsn_processing_q.op == VBITLINEAR);
 
     // Valid of the unit in use (i.e., result queue input valid) is not asserted by default
     unit_out_valid  = 1'b0;
@@ -1440,7 +1451,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
                 : mfpu_operand_i[0]; // vs1, rs1
     operand_c = mfpu_operand_i[2]; // vd, or vs2 if we are performing a VFADD/VFSUB/VFRSUB
 
-    // If vs2 and vd were swapped, re-route the handshake signals to/from the operand queues
+    // If vs2 and vd were s˙wapped, re-route the handshake signals to/from the operand queues
     operands_valid = vinsn_issue_q.swap_vs2_vd_op
                    ? ((mfpu_operand_valid_i[2] || !vinsn_issue_q.use_vs2) &&
                       (mfpu_operand_valid_i[1] || !vinsn_issue_q.use_vd_op) &&
@@ -1519,16 +1530,19 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
 
         // Is there a vector instruction ready to be issued and do we have all the operands necessary for this instruction?
         if (operands_valid && vinsn_issue_q_valid && !is_reduction(vinsn_issue_q.op) && issue_cnt_q != '0 && !latency_stall) begin
-          // Valiudate the inputs of the correct unit
+          // Valiudate the inputs of the correct unit 
           vmul_in_valid = vinsn_issue_mul;
           vdiv_in_valid = vinsn_issue_div;
           vfpu_in_valid = vinsn_issue_fpu;
+          vbitlinear_in_valid = vinsn_issue_vbitlinear;
 
           // Is the unit in use ready?
           if ((vinsn_issue_mul && vmul_in_ready) || (vinsn_issue_div && vdiv_in_ready) ||
-              (vinsn_issue_fpu && vfpu_in_ready)) begin
+              (vinsn_issue_fpu && vfpu_in_ready)||
+              (vinsn_issue_vbitlinear && vbitlinear_in_ready)) begin
             // Acknowledge the operands of this instruction
             mfpu_operand_ready_o = operands_ready;
+            //$display("[%0t] %m: Acknowledging operands for instruction %0d", $time, vinsn_issue_q.id);
 
             // Update the element issue counter and the related issue_be signal for the divider
             begin
@@ -1602,6 +1616,11 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
             unit_out_result = vfpu_processed_result;
             unit_out_mask   = vfpu_mask;
           end
+          VBITLINEAR: begin
+            unit_out_valid  = vbitlinear_out_valid;
+            unit_out_result = vbitlinear_result;
+            unit_out_mask   = vbitlinear_mask;
+          end
         endcase
 
         // Narrowing FPU results need to be shuffled before being saved for storing
@@ -1616,11 +1635,6 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
             narrowing_shuffled_result[15:8]  = unit_out_result[7:0];
             narrowing_shuffled_result[7:0]   = unit_out_result[7:0];
             narrowing_shuffle_be             = !narrowing_select_out_q ? 8'b01010101 : 8'b10101010;
-          end else begin
-            // Default assignment
-            narrowing_shuffled_result[63:32] = unit_out_result[31:0];
-            narrowing_shuffled_result[31:0]  = unit_out_result[31:0];
-            narrowing_shuffle_be             = !narrowing_select_out_q ? 8'b00110011 : 8'b11001100;
           end
           EW16: begin
             narrowing_shuffled_result[63:48] = unit_out_result[31:16];
@@ -1640,6 +1654,8 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
             narrowing_shuffle_be             = !narrowing_select_out_q ? 8'b00110011 : 8'b11001100;
           end
         endcase
+
+        //$display("unit_out_valid %b",unit_out_valid);
 
         // Check if we have a valid result and we can add it to the result queue
         if (unit_out_valid && !result_queue_full) begin
@@ -1956,7 +1972,7 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
                 simd_red_cnt_d = '0;
                 mfpu_state_d = SIMD_REDUCTION;
               // The other lanes can commit
-              end else begin
+              end else begin  
                 // From this lane's perspective, the reduction is over
                 mfpu_state_d = LN0_REDUCTION_COMMIT;
               end
@@ -2196,14 +2212,19 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
     mfpu_result_id_o    = result_queue_q[result_queue_read_pnt_q].id;
     mfpu_result_wdata_o = result_queue_q[result_queue_read_pnt_q].wdata;
     mfpu_result_be_o    = result_queue_q[result_queue_read_pnt_q].be;
-
+    /*if(commit_cnt_q != '0) begin
+      $display("=== [VMFPU-VRF-GRANT @ %0t Lane %0d] ===", $time, lane_id_i);
+      $display("[VMFPU-DEBUG] VRF grant received: gnt_i=%0d, mask_gnt=%0d", mfpu_result_gnt_i, mask_operand_gnt);
+      $display("[VMFPU-DEBUG] Before: commit_cnt_q=%0d, result_queue_cnt=%0d", commit_cnt_q, result_queue_cnt_q);
+      $display("[VMFPU-DEBUG] State: %0s", mfpu_state_q.name());
+    end*/
     // Received a grant from the VRF, or the mask unit ate the result.
     // Deactivate the request.
     if (mfpu_result_gnt_i || mask_operand_gnt) begin
       // How many elements are we committing?
       automatic logic [3:0] commit_element_cnt =
         (1 << (int'(EW64) - int'(vinsn_commit.vtype.vsew)));
-
+      //$display("=== [VMFPU-VRF-GRANT @ %0t Lane %0d] ===", $time, lane_id_i);
       result_queue_valid_d[result_queue_read_pnt_q] = 1'b0;
       result_queue_d[result_queue_read_pnt_q]       = '0;
 
@@ -2220,10 +2241,15 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
         commit_cnt_d = commit_cnt_q - commit_element_cnt;
         if (commit_cnt_q < commit_element_cnt) commit_cnt_d = '0;
       end
+      //$display("[VMFPU-DEBUG] After: commit_cnt_d=%0d, result_queue_cnt_d=%0d", commit_cnt_d, result_queue_cnt_d);
     end
 
     // Finished committing the results of a vector instruction
     if (vinsn_commit_valid && (commit_cnt_d == '0) && !prevent_commit) begin
+
+     // $display("=== [VMFPU-INSTRUCTION-COMPLETE @ %0t Lane %0d] ===", $time, lane_id_i);
+     // $display("[VMFPU-DEBUG] Instruction %0d completed! State: %0s", vinsn_commit.id, mfpu_state_q.name());
+      //$display("[VMFPU-DEBUG] Operation: %0s, Reduction: %0d", vinsn_commit.op.name(), is_reduction(vinsn_commit.op));
       // Mark the vector instruction as being done
       mfpu_vinsn_done_o[vinsn_commit.id] = 1'b1;
 
@@ -2270,7 +2296,9 @@ module vmfpu import ara_pkg::*; import rvv_pkg::*; import fpnew_pkg::*;
     //////////////////////////////
     //  Accept new instruction  //
     //////////////////////////////
-
+    // Accept a new vector instruction if the queue is not full
+    /*$display("[VMFPU-DEBUG] Accepting new instruction: vinsn_queue_full=%0d, vfu_operation_valid_i=%0d, vfu_operation_i.vfu=%0s, vfu_operation_i.op=%0s",
+             vinsn_queue_full, vfu_operation_valid_i, vfu_operation_i.vfu.name(), vfu_operation_i.op.name());*/
     if (!vinsn_queue_full && vfu_operation_valid_i &&
       (vfu_operation_i.vfu == VFU_MFpu || vfu_operation_i.op inside {[VMFEQ:VMFGE]})) begin
       vinsn_queue_d.vinsn[vinsn_queue_q.accept_pnt]    = vfu_operation_i;

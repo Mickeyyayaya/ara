@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 // Copyright 2021 ETH Zurich and University of Bologna.
 // Solderpad Hardware License, Version 0.51, see LICENSE for details.
 // SPDX-License-Identifier: SHL-0.51
@@ -83,9 +84,10 @@ package ara_pkg;
   localparam int unsigned LatMultiplierEW64 = 1;
   localparam int unsigned LatMultiplierEW32 = 1;
   localparam int unsigned LatMultiplierEW16 = 1;
-  localparam int unsigned LatMultiplierEW8  = 0;
+  localparam int unsigned LatMultiplierEW8  = 1;
 
   // FPU latencies.
+  localparam int unsigned LatFBitlinear   = 'd5;
   localparam int unsigned LatFCompEW64    = 'd5;
   localparam int unsigned LatFCompEW32    = 'd4;
   localparam int unsigned LatFCompEW16    = 'd3;
@@ -103,6 +105,7 @@ package ara_pkg;
   localparam MaxVInsnQueueDepth = 4;
   // FUs instruction queue depth.
   localparam int unsigned MfpuInsnQueueDepth = 4;
+  localparam int unsigned TmacInsnQueueDepth = 4;
   localparam int unsigned ValuInsnQueueDepth = 4;
   localparam int unsigned VlduInsnQueueDepth = 4;
   localparam int unsigned VstuInsnQueueDepth = 4;
@@ -111,6 +114,9 @@ package ara_pkg;
   localparam int unsigned NoneInsnQueueDepth = 1;
   // Ara supports MaskuInsnQueueDepth = 1 only.
   localparam int unsigned MaskuInsnQueueDepth = 1;
+  // Custom PE instruction queue depth.
+  localparam int unsigned CustomPEInsnQueueDepth = 4;
+  localparam int unsigned NrCustomPEOperands = 2;
 
   ///////////////////
   //  Definitions  //
@@ -142,6 +148,8 @@ package ara_pkg;
     VSMUL,
     // Div
     VDIVU, VDIV, VREMU, VREM,
+    // [VBITLINEAR INTEGRATION] Add new instruction opcode here
+    VBITLINEAR,
     // FPU
     VFADD, VFSUB, VFRSUB, VFMUL, VFDIV, VFRDIV, VFMACC, VFNMACC, VFMSAC, VFNMSAC, VFMADD, VFNMADD, VFMSUB,
     VFNMSUB, VFSQRT, VFMIN, VFMAX, VFREC7, VFRSQRT7, VFCLASS, VFSGNJ, VFSGNJN, VFSGNJX, VFCVTXUF, VFCVTXF, VFCVTFXU, VFCVTFX,
@@ -164,6 +172,8 @@ package ara_pkg;
     VMANDNOT, VMAND, VMOR, VMXOR, VMORNOT, VMNAND, VMNOR, VMXNOR,
     // Complex permutations
     VRGATHER, VRGATHEREI16, VCOMPRESS,
+    // Custom PE operations
+    VCUSTOM_MAC,
     // Scalar moves from VRF
     VMVXS, VFMVFS,
     // Slide instructions
@@ -171,7 +181,9 @@ package ara_pkg;
     // Load instructions
     VLE, VLSE, VLXE,
     // Store instructions
-    VSE, VSSE, VSXE
+    VSE, VSSE, VSXE,
+    //T-mac instruction
+    VTMUL1, VTMUL2, VTMUL3, VTMUL4
   } ara_op_e;
 
   // Return true if op is a load operation
@@ -352,6 +364,18 @@ typedef struct packed {
     fp64_from_fp32 = fp64;
   endfunction
 
+  /////////////////////////////
+  //  Accelerator interface  //
+  /////////////////////////////
+
+  // Use Ariane's accelerator interface.
+  typedef acc_pkg::cva6_to_acc_t cva6_to_acc_t;
+  typedef acc_pkg::acc_to_cva6_t acc_to_cva6_t;
+  typedef acc_pkg::accelerator_req_t accelerator_req_t;
+  typedef acc_pkg::accelerator_resp_t accelerator_resp_t;
+  typedef acc_pkg::acc_mmu_req_t acc_mmu_req_t;
+  typedef acc_pkg::acc_mmu_resp_t acc_mmu_resp_t;
+
   ////////////////////
   //  PE interface  //
   ////////////////////
@@ -361,9 +385,9 @@ typedef struct packed {
   // It is important that all the VFUs that can write back to the VRF
   // are grouped towards the beginning of the enumeration. The store unit
   // cannot do so, therefore it is at the end of the enumeration.
-  localparam int unsigned NrVFUs = 7;
+  localparam int unsigned NrVFUs = 9;
   typedef enum logic [$clog2(NrVFUs)-1:0] {
-    VFU_Alu, VFU_MFpu, VFU_SlideUnit, VFU_MaskUnit, VFU_LoadUnit, VFU_StoreUnit, VFU_None
+    VFU_Alu, VFU_MFpu, VFU_Tmac, VFU_SlideUnit, VFU_MaskUnit, VFU_LoadUnit, VFU_StoreUnit, VFU_CustomPE, VFU_None
   } vfu_e;
 
   // Internally, each lane is treated as a processing element, between indexes
@@ -371,8 +395,8 @@ typedef struct packed {
   // scale also are with index given by NrLanes plus the following offset.
   //
   // The load and the store unit must be at the beginning of this enumeration.
-  typedef enum logic [1:0] {
-    OffsetLoad, OffsetStore, OffsetMask, OffsetSlide
+  typedef enum logic [2:0] {
+    OffsetLoad, OffsetStore, OffsetMask, OffsetSlide, OffsetCustomPE
   } vfu_offset_e;
 
   /* The VRF data is stored into the lanes in a shuffled way, similar to how it was done
@@ -909,9 +933,9 @@ typedef struct packed {
   /////////////////////////
 
   // Which FU should process the mask unit request?
-  localparam int unsigned NrMaskFUnits = 2;
+  localparam int unsigned NrMaskFUnits = 3;
   typedef enum logic [cf_math_pkg::idx_width(NrMaskFUnits)-1:0]{
-    MaskFUAlu, MaskFUMFpu
+    MaskFUAlu, MaskFUMFpu, MaskFUCustomPE
   } masku_fu_e;
 
   ////////////////////////
@@ -919,12 +943,13 @@ typedef struct packed {
   ////////////////////////
 
   // There are seven operand queues, serving operands to the different functional units of each lane
-  localparam int unsigned NrOperandQueues = 9;
+  localparam int unsigned NrOperandQueues = 14;
   typedef enum logic [$clog2(NrOperandQueues)-1:0] {
-    AluA, AluB, MulFPUA, MulFPUB, MulFPUC, MaskB, MaskM, StA, SlideAddrGenA
+    AluA, AluB, MulFPUA, MulFPUB, MulFPUC, TmacA, TmacB, TmacC, MaskB, MaskM, StA, SlideAddrGenA, CustomPEA, CustomPEB
   } opqueue_e;
 
   // Each lane has eight VRF banks
+  // NOTE: values != 8 are not supported
   localparam int unsigned NrVRFBanksPerLane = 8;
 
   // Find the starting address (in bytes) of a vector register chunk of vid
@@ -933,10 +958,10 @@ typedef struct packed {
     // Each vector register spans multiple words in each bank in each lane
     // The start address is the same in every lane
     // Therefore, within each lane, each vector register chunk starts on a given offset
-    vaddr = vid * (vlenb / NrLanes / 8);
-    // NOTE: For the extensively tested configuration of Ara keeps:
-    //        - (VLEN / NrLanes) to 1024;
-    //        - NrVRFBanksPerLane equal to 8.
+    vaddr = vid * (vlenb / NrLanes / NrVRFBanksPerLane);
+    // NOTE: the only extensively tested configuration of Ara keeps:
+    //        - (VLEN / NrLanes) constant to 1024;
+    //        - NrVRFBanksPerLane always equal to 8.
     //        Given so, each vector register will span 2 words across all the banks and lanes,
     //        therefore, vaddr = vid * 16
   endfunction: vaddr

@@ -12,7 +12,6 @@
 module lane import ara_pkg::*; import rvv_pkg::*; #(
     parameter  int           unsigned NrLanes               = 1, // Number of lanes
     parameter  int           unsigned VLEN                  = 0,
-    parameter  config_pkg::cva6_cfg_t CVA6Cfg               = cva6_config_pkg::cva6_cfg,
     // Support for floating-point data types
     parameter  fpu_support_e          FPUSupport            = FPUSupportHalfSingleDouble,
     // External support for vfrec7, vfrsqrt7
@@ -60,6 +59,8 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     output `STRUCT_PORT_BITS(pe_resp_t_bits)               pe_resp_o,
     output logic                                           alu_vinsn_done_o,
     output logic                                           mfpu_vinsn_done_o,
+    output logic                                           tmac_vinsn_done_o,
+    output logic                                           custom_pe_vinsn_done_o,
     input  logic                [NrVInsn-1:0][NrVInsn-1:0] global_hazard_table_i,
     // Interface with the Store unit
     output elen_t                                          stu_operand_o,
@@ -220,6 +221,11 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
   logic                 [NrVInsn-1:0]         alu_vinsn_done;
   logic                                       mfpu_ready;
   logic                 [NrVInsn-1:0]         mfpu_vinsn_done;
+  logic                                       tmac_ready;
+  logic                 [NrVInsn-1:0]         tmac_vinsn_done;
+  logic                                       custom_pe_ready;
+  logic                 [NrVInsn-1:0]         custom_pe_vinsn_done;
+  
   // Interface with the MaskB operand queue (VRGATHER/VCOMPRESS)
   logic                                       mask_b_cmd_pop_d, mask_b_cmd_pop_q;
   `FF(mask_b_cmd_pop_q, mask_b_cmd_pop_d, 1'b0, clk_i, rst_ni);
@@ -260,6 +266,7 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     .operand_request_ready_i(operand_request_ready),
     .alu_vinsn_done_o       (alu_vinsn_done_o     ),
     .mfpu_vinsn_done_o      (mfpu_vinsn_done_o    ),
+    .tmac_vinsn_done_o      (tmac_vinsn_done_o    ),
     // Interface with the Operand Queue
     .mask_b_cmd_pop_i       (mask_b_cmd_pop_q     ),
     // Interface with the VFUs
@@ -269,6 +276,11 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     .alu_vinsn_done_i       (alu_vinsn_done       ),
     .mfpu_ready_i           (mfpu_ready           ),
     .mfpu_vinsn_done_i      (mfpu_vinsn_done      ),
+    .tmac_ready_i           (tmac_ready           ),
+    .tmac_vinsn_done_i      (tmac_vinsn_done      ),
+    .custom_pe_ready_i      (custom_pe_ready      ),
+    .custom_pe_vinsn_done_i (custom_pe_vinsn_done ),
+    .custom_pe_vinsn_done_o (custom_pe_vinsn_done_o),
     // From the MASKU - for VRGATHER/VCOMPRESS
     .masku_vrgat_req_valid_i(masku_vrgat_req_valid_i ),
     .masku_vrgat_req_ready_o(masku_vrgat_req_ready_o ),
@@ -306,6 +318,20 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
   elen_t                                      mfpu_result_wdata;
   strb_t                                      mfpu_result_be;
   logic                                       mfpu_result_gnt;
+  // Tmac unit
+  logic                                       tmac_result_req;
+  vid_t                                       tmac_result_id;
+  vaddr_t                                     tmac_result_addr;
+  elen_t                                      tmac_result_wdata;
+  strb_t                                      tmac_result_be;
+  logic                                       tmac_result_gnt;
+  // Custom PE
+  logic                                       custom_pe_result_req;
+  vid_t                                       custom_pe_result_id;
+  vaddr_t                                     custom_pe_result_addr;
+  elen_t                                      custom_pe_result_wdata;
+  strb_t                                      custom_pe_result_be;
+  logic                                       custom_pe_result_gnt;
   // To the slide unit (reductions)
   logic                                       sldu_result_gnt_opqueues;
   // Support for store exception flush
@@ -358,6 +384,13 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     .mfpu_result_wdata_i      (mfpu_result_wdata       ),
     .mfpu_result_be_i         (mfpu_result_be          ),
     .mfpu_result_gnt_o        (mfpu_result_gnt         ),
+    // Tmac Unit
+    .tmac_result_req_i        (tmac_result_req         ),
+    .tmac_result_id_i         (tmac_result_id          ),
+    .tmac_result_addr_i       (tmac_result_addr        ),
+    .tmac_result_wdata_i      (tmac_result_wdata       ),
+    .tmac_result_be_i         (tmac_result_be          ),
+    .tmac_result_gnt_o        (tmac_result_gnt         ),
     // Mask Unit
     .masku_result_req_i       (masku_result_req_i      ),
     .masku_result_id_i        (masku_result_id_i       ),
@@ -381,7 +414,16 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     .ldu_result_wdata_i       (ldu_result_wdata_i      ),
     .ldu_result_be_i          (ldu_result_be_i         ),
     .ldu_result_gnt_o         (ldu_result_gnt_o        ),
-    .ldu_result_final_gnt_o   (ldu_result_final_gnt_o  )
+    .ldu_result_final_gnt_o   (ldu_result_final_gnt_o  ),
+    // Custom PE
+    .custom_pe_result_req_i   (custom_pe_result_req    ),
+    .custom_pe_result_id_i    (custom_pe_result_id     ),
+    .custom_pe_result_addr_i  (custom_pe_result_addr   ),
+    .custom_pe_result_wdata_i (custom_pe_result_wdata  ),
+    .custom_pe_result_be_i    (custom_pe_result_be     ),
+    .custom_pe_result_gnt_o   (custom_pe_result_gnt    ),
+    .custom_pe_result_final_gnt_o()
+
   );
 
   ////////////////////////////
@@ -424,6 +466,14 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
   elen_t [2:0] mfpu_operand;
   logic  [2:0] mfpu_operand_valid;
   logic  [2:0] mfpu_operand_ready;
+  // Tmac Unit
+  elen_t [2:0] tmac_operand;
+  logic  [2:0] tmac_operand_valid;
+  logic  [2:0] tmac_operand_ready;
+  // custom PE
+  elen_t [1:0] custom_pe_operand;
+  logic  [1:0] custom_pe_operand_valid;
+  logic  [1:0] custom_pe_operand_ready;
 
   elen_t sldu_addrgen_operand_opqueues;
   target_fu_e sldu_addrgen_operand_target_fu;
@@ -465,6 +515,14 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     .mfpu_operand_o                   (mfpu_operand                       ),
     .mfpu_operand_valid_o             (mfpu_operand_valid                 ),
     .mfpu_operand_ready_i             (mfpu_operand_ready                 ),
+    // Tmac Unit
+    .tmac_operand_o                   (tmac_operand                       ),
+    .tmac_operand_valid_o             (tmac_operand_valid                 ),
+    .tmac_operand_ready_i             (tmac_operand_ready                 ),
+    // Custom PE
+    .custom_pe_operand_o              (custom_pe_operand                  ),
+    .custom_pe_operand_valid_o        (custom_pe_operand_valid            ),
+    .custom_pe_operand_ready_i        (custom_pe_operand_ready            ),
     // Store Unit
     .stu_operand_o                    (stu_operand_o                      ),
     .stu_operand_valid_o              (stu_operand_valid_o                ),
@@ -490,11 +548,11 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
   logic sldu_alu_req_valid_o, sldu_mfpu_req_valid_o;
   logic sldu_alu_ready, sldu_mfpu_ready;
   logic alu_red_complete, fpu_red_complete;
+  
 
   vector_fus_stage #(
     .NrLanes        (NrLanes        ),
     .VLEN           (VLEN           ),
-    .CVA6Cfg        (CVA6Cfg        ),
     .FPUSupport     (FPUSupport     ),
     .FPExtSupport   (FPExtSupport   ),
     .FixPtSupport   (FixPtSupport   ),
@@ -517,6 +575,8 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     .alu_vinsn_done_o     (alu_vinsn_done                         ),
     .mfpu_ready_o         (mfpu_ready                             ),
     .mfpu_vinsn_done_o    (mfpu_vinsn_done                        ),
+    .tmac_ready_o         (tmac_ready                             ),
+    .tmac_vinsn_done_o    (tmac_vinsn_done                        ),
     // Interface with the SLDU/ADDRGEN arbiter
     .alu_red_complete_o   (alu_red_complete                       ),
     .fpu_red_complete_o   (fpu_red_complete                       ),
@@ -535,6 +595,13 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     .mfpu_result_wdata_o  (mfpu_result_wdata                      ),
     .mfpu_result_be_o     (mfpu_result_be                         ),
     .mfpu_result_gnt_i    (mfpu_result_gnt                        ),
+    // Tmac Unit
+    .tmac_result_req_o    (tmac_result_req                        ),
+    .tmac_result_id_o     (tmac_result_id                         ),
+    .tmac_result_addr_o   (tmac_result_addr                       ),
+    .tmac_result_wdata_o  (tmac_result_wdata                      ),
+    .tmac_result_be_o     (tmac_result_be                         ),
+    .tmac_result_gnt_i    (tmac_result_gnt                        ),
     // Interface with the Slide Unit
     .sldu_alu_req_valid_o (sldu_alu_req_valid_o                   ),
     .sldu_alu_valid_i     (sldu_alu_valid                         ),
@@ -554,13 +621,29 @@ module lane import ara_pkg::*; import rvv_pkg::*; #(
     .mfpu_operand_i       (mfpu_operand                           ),
     .mfpu_operand_valid_i (mfpu_operand_valid                     ),
     .mfpu_operand_ready_o (mfpu_operand_ready                     ),
+    // Tmac Unit
+    .tmac_operand_i       (tmac_operand                           ),
+    .tmac_operand_valid_i (tmac_operand_valid                     ),
+    .tmac_operand_ready_o (tmac_operand_ready                     ),
     // Interface with the Mask unit
     .mask_operand_o       (mask_operand_o[2 +: NrMaskFUnits]      ),
     .mask_operand_valid_o (mask_operand_valid_o[2 +: NrMaskFUnits]),
     .mask_operand_ready_i (mask_operand_ready_i[2 +: NrMaskFUnits]),
     .mask_i               (mask                                   ),
     .mask_valid_i         (mask_valid                             ),
-    .mask_ready_o         (mask_ready                             )
+    .mask_ready_o         (mask_ready                             ),
+    // Interface with the Custom PE
+    .custom_pe_ready_o                (custom_pe_ready                    ),
+    .custom_pe_vinsn_done_o           (custom_pe_vinsn_done               ),
+    .custom_pe_operand_i              (custom_pe_operand                  ),
+    .custom_pe_operand_valid_i        (custom_pe_operand_valid            ),
+    .custom_pe_operand_ready_o        (custom_pe_operand_ready            ),
+    .custom_pe_result_req_o           (custom_pe_result_req               ),
+    .custom_pe_result_id_o            (custom_pe_result_id                ),
+    .custom_pe_result_addr_o          (custom_pe_result_addr              ),
+    .custom_pe_result_wdata_o         (custom_pe_result_wdata             ),
+    .custom_pe_result_be_o            (custom_pe_result_be                ),
+    .custom_pe_result_gnt_i           (custom_pe_result_gnt               )
   );
 
   /******************************

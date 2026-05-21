@@ -57,6 +57,13 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
     input  elen_t                                      mfpu_result_wdata_i,
     input  strb_t                                      mfpu_result_be_i,
     output logic                                       mfpu_result_gnt_o,
+    // Tmac unit
+    input  logic                                       tmac_result_req_i,
+    input  vid_t                                       tmac_result_id_i,
+    input  vaddr_t                                     tmac_result_addr_i,
+    input  elen_t                                      tmac_result_wdata_i,
+    input  strb_t                                      tmac_result_be_i,
+    output logic                                       tmac_result_gnt_o,
     // Mask unit
     input  logic                                       masku_result_req_i,
     input  vid_t                                       masku_result_id_i,
@@ -80,7 +87,15 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
     input  elen_t                                      ldu_result_wdata_i,
     input  strb_t                                      ldu_result_be_i,
     output logic                                       ldu_result_gnt_o,
-    output logic                                       ldu_result_final_gnt_o
+    output logic                                       ldu_result_final_gnt_o,
+    //custom pe unit
+    input logic                                        custom_pe_result_req_i,
+    input vid_t                                        custom_pe_result_id_i,
+    input vaddr_t                                      custom_pe_result_addr_i,
+    input elen_t                                       custom_pe_result_wdata_i,
+    input strb_t                                       custom_pe_result_be_i,
+    output logic                                       custom_pe_result_gnt_o,
+    output logic                                       custom_pe_result_final_gnt_o
   );
 
   import cf_math_pkg::idx_width;
@@ -95,6 +110,30 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
     elen_t wdata;
     strb_t be;
   } stream_register_payload_t;
+
+  vid_t   custom_pe_result_id;
+  vaddr_t custom_pe_result_addr;
+  elen_t  custom_pe_result_wdata;
+  strb_t  custom_pe_result_be;
+  logic   custom_pe_result_req;
+  logic   custom_pe_result_gnt;
+  
+  stream_register #(.T(stream_register_payload_t)) i_custom_pe_stream_register (
+    .clk_i     (clk_i                                                                                      ),
+    .rst_ni    (rst_ni                                                                                     ),
+    .clr_i     (1'b0                                                                                       ),
+    .testmode_i(1'b0                                                                                       ),
+    .data_i    ({custom_pe_result_id_i, custom_pe_result_addr_i, custom_pe_result_wdata_i, custom_pe_result_be_i}),
+    .valid_i   (custom_pe_result_req_i                                                                     ),
+    .ready_o   (                                                            ),
+    .data_o    ({custom_pe_result_id, custom_pe_result_addr, custom_pe_result_wdata, custom_pe_result_be}  ),
+    .valid_o   (custom_pe_result_req                                                                       ),
+    .ready_i   (custom_pe_result_gnt                                                                       )
+  );
+
+
+  logic custom_pe_stream_ready;
+  assign custom_pe_result_gnt_o = custom_pe_stream_ready;
 
   // Load unit
   vid_t   ldu_result_id;
@@ -163,10 +202,12 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
       ldu_result_final_gnt_o   <= 1'b0;
       sldu_result_final_gnt_o  <= 1'b0;
       masku_result_final_gnt_o <= 1'b0;
+      custom_pe_result_final_gnt_o <= 1'b0;
     end else begin
       ldu_result_final_gnt_o   <= ldu_result_gnt;
       sldu_result_final_gnt_o  <= sldu_result_gnt;
       masku_result_final_gnt_o <= masku_result_gnt;
+      custom_pe_result_final_gnt_o <= custom_pe_result_gnt;
     end
   end
 
@@ -192,6 +233,7 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
     vinsn_result_written_d[masku_result_id] |= masku_result_gnt;
     vinsn_result_written_d[ldu_result_id] |= ldu_result_gnt;
     vinsn_result_written_d[sldu_result_id] |= sldu_result_gnt;
+    vinsn_result_written_d[custom_pe_result_id] |= custom_pe_result_gnt;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin: p_vinsn_result_written_ff
@@ -217,8 +259,8 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
 
   // A set bit indicates that the the master q is requesting access to the bank b
   // Masters 0 to NrOperandQueues-1 correspond to the operand queues.
-  // The remaining four masters correspond to the ALU, the MFPU, the MASKU, the VLDU, and the SLDU.
-  localparam NrGlobalMasters = 5;
+
+  localparam NrGlobalMasters = 8; 
   localparam NrMasters = NrOperandQueues + NrGlobalMasters;
 
   typedef struct packed {
@@ -501,6 +543,10 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
       ext_operand_req[bank][VFU_MaskUnit]  = 1'b0;
       ext_operand_req[bank][VFU_SlideUnit] = 1'b0;
       ext_operand_req[bank][VFU_LoadUnit]  = 1'b0;
+
+      if (int'(VFU_CustomPE) < NrGlobalMasters) begin
+        ext_operand_req[bank][VFU_CustomPE]  = 1'b0;
+      end
     end
 
     // Generate the payloads for write back operations
@@ -544,12 +590,34 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
       opqueue: AluA,
       default: '0
     };
+    // tmac
+    operand_payload[NrOperandQueues + VFU_Tmac] = '{
+      addr   : tmac_result_addr_i >> $clog2(NrBanks),
+      wen    : 1'b1,
+      wdata  : tmac_result_wdata_i,
+      be     : tmac_result_be_i,
+      opqueue: AluA,
+      default: '0
+    };
+
+    if (int'(VFU_CustomPE) < NrGlobalMasters && (NrOperandQueues + int'(VFU_CustomPE)) < NrMasters) begin
+      operand_payload[NrOperandQueues + VFU_CustomPE] = '{
+        addr   : custom_pe_result_addr >> $clog2(NrBanks),
+        wen    : 1'b1,
+        wdata  : custom_pe_result_wdata,
+        be     : custom_pe_result_be,
+        opqueue: CustomPEA,
+        default: '0
+      };
+    end
 
     // Store their request value
     ext_operand_req[alu_result_addr_i[idx_width(NrBanks)-1:0]][VFU_Alu] =
     alu_result_req_i;
     ext_operand_req[mfpu_result_addr_i[idx_width(NrBanks)-1:0]][VFU_MFpu] =
     mfpu_result_req_i;
+    ext_operand_req[tmac_result_addr_i[idx_width(NrBanks)-1:0]][VFU_Tmac] =
+    tmac_result_req_i;
     ext_operand_req[masku_result_addr[idx_width(NrBanks)-1:0]][VFU_MaskUnit] =
     masku_result_req;
     ext_operand_req[sldu_result_addr[idx_width(NrBanks)-1:0]][VFU_SlideUnit] =
@@ -557,76 +625,120 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
     ext_operand_req[ldu_result_addr[idx_width(NrBanks)-1:0]][VFU_LoadUnit] =
     ldu_result_req;
 
+    if (int'(VFU_CustomPE) < NrGlobalMasters) begin
+      ext_operand_req[custom_pe_result_addr[idx_width(NrBanks)-1:0]][VFU_CustomPE] =
+      custom_pe_result_req;
+    end
+
     // Generate the grant signals
     alu_result_gnt_o  = 1'b0;
     mfpu_result_gnt_o = 1'b0;
     masku_result_gnt  = 1'b0;
     sldu_result_gnt   = 1'b0;
     ldu_result_gnt    = 1'b0;
+    tmac_result_gnt_o = 1'b0;
+    custom_pe_result_gnt = 1'b0;
     for (int bank = 0; bank < NrBanks; bank++) begin
       alu_result_gnt_o  = alu_result_gnt_o | operand_gnt[bank][NrOperandQueues + VFU_Alu];
       mfpu_result_gnt_o = mfpu_result_gnt_o | operand_gnt[bank][NrOperandQueues + VFU_MFpu];
       masku_result_gnt  = masku_result_gnt | operand_gnt[bank][NrOperandQueues + VFU_MaskUnit];
       sldu_result_gnt   = sldu_result_gnt | operand_gnt[bank][NrOperandQueues + VFU_SlideUnit];
       ldu_result_gnt    = ldu_result_gnt | operand_gnt[bank][NrOperandQueues + VFU_LoadUnit];
+      tmac_result_gnt_o = tmac_result_gnt_o | operand_gnt[bank][NrOperandQueues + VFU_Tmac];
+
+      if (int'(VFU_CustomPE) < NrGlobalMasters && (NrOperandQueues + int'(VFU_CustomPE)) < NrMasters) begin
+        custom_pe_result_gnt = custom_pe_result_gnt | operand_gnt[bank][NrOperandQueues + VFU_CustomPE];
+      end
     end
   end
 
   // Instantiate a RR arbiter per bank
   for (genvar bank = 0; bank < NrBanks; bank++) begin: gen_vrf_arbiters
-    // High-priority requests
-    payload_t payload_hp;
-    logic payload_hp_req;
-    logic payload_hp_gnt;
+
+    payload_t payload_hp_opq;
+    logic payload_hp_opq_req;
+    logic payload_hp_opq_gnt;
+    
+
+    payload_t payload_mp_custom;
+    logic payload_mp_custom_req;
+    logic payload_mp_custom_gnt;
+    
+    payload_t payload_lp;
+    logic payload_lp_req;
+    logic payload_lp_gnt;
+
     rr_arb_tree #(
-      .NumIn    (unsigned'(MulFPUC) - unsigned'(AluA) + 1 + unsigned'(VFU_MFpu) - unsigned'(VFU_Alu) + 1),
-      .DataWidth($bits(payload_t)                                                   ),
-      .AxiVldRdy(1'b0                                                               )
-    ) i_hp_vrf_arbiter (
+      .NumIn    (unsigned'(TmacC) - unsigned'(AluA) + 1),
+      .DataWidth($bits(payload_t)),
+      .AxiVldRdy(1'b0)
+    ) i_hp_opq_vrf_arbiter (
       .clk_i  (clk_i ),
       .rst_ni (rst_ni),
       .flush_i(1'b0  ),
       .rr_i   ('0    ),
-      .data_i ({operand_payload[MulFPUC:AluA],
-          operand_payload[NrOperandQueues + VFU_MFpu:NrOperandQueues + VFU_Alu]} ),
-      .req_i ({lane_operand_req[bank][MulFPUC:AluA],
-          ext_operand_req[bank][VFU_MFpu:VFU_Alu]}),
-      .gnt_o ({operand_gnt[bank][MulFPUC:AluA],
-          operand_gnt[bank][NrOperandQueues + VFU_MFpu:NrOperandQueues + VFU_Alu]}),
-      .data_o (payload_hp    ),
+      .data_i (operand_payload[TmacC:AluA]),
+      .req_i  (lane_operand_req[bank][TmacC:AluA]),
+      .gnt_o  (operand_gnt[bank][TmacC:AluA]),
+      .data_o (payload_hp_opq    ),
       .idx_o  (/* Unused */  ),
-      .req_o  (payload_hp_req),
-      .gnt_i  (payload_hp_gnt)
+      .req_o  (payload_hp_opq_req),
+      .gnt_i  (payload_hp_opq_gnt)
     );
 
-    // Low-priority requests
-    payload_t payload_lp;
-    logic payload_lp_req;
-    logic payload_lp_gnt;
+    assign payload_mp_custom = (int'(VFU_CustomPE) < NrGlobalMasters && (NrOperandQueues + int'(VFU_CustomPE)) < NrMasters) ? 
+                              operand_payload[NrOperandQueues + VFU_CustomPE] : '0;
+    assign payload_mp_custom_req = (int'(VFU_CustomPE) < NrGlobalMasters) ? 
+                                   ext_operand_req[bank][VFU_CustomPE] : 1'b0;
+    
+    always_comb begin
+      if (int'(VFU_CustomPE) < NrGlobalMasters && (NrOperandQueues + int'(VFU_CustomPE)) < NrMasters) begin
+        operand_gnt[bank][NrOperandQueues + VFU_CustomPE] = payload_mp_custom_gnt;
+      end
+    end
+
+    localparam int unsigned NumLowPrioInputs = 
+      (unsigned'(SlideAddrGenA) - unsigned'(MaskB) + 1) + 6; // +5 for ALU, MFPU, MASK, SLIDE, LOAD
+    
     rr_arb_tree #(
-      .NumIn(unsigned'(SlideAddrGenA)- unsigned'(MaskB) + 1 + unsigned'(VFU_LoadUnit) - unsigned'(VFU_SlideUnit) + 1),
-      .DataWidth($bits(payload_t)                                                               ),
-      .AxiVldRdy(1'b0                                                                           )
+      .NumIn(NumLowPrioInputs),
+      .DataWidth($bits(payload_t)),
+      .AxiVldRdy(1'b0)
     ) i_lp_vrf_arbiter (
       .clk_i  (clk_i ),
       .rst_ni (rst_ni),
       .flush_i(1'b0  ),
       .rr_i   ('0    ),
       .data_i ({operand_payload[SlideAddrGenA:MaskB],
-          operand_payload[NrOperandQueues + VFU_LoadUnit:NrOperandQueues + VFU_SlideUnit]} ),
+                operand_payload[NrOperandQueues + VFU_Alu],
+                operand_payload[NrOperandQueues + VFU_MFpu],
+                operand_payload[NrOperandQueues + VFU_Tmac],
+                operand_payload[NrOperandQueues + VFU_MaskUnit],
+                operand_payload[NrOperandQueues + VFU_SlideUnit],
+                operand_payload[NrOperandQueues + VFU_LoadUnit]}),
       .req_i ({lane_operand_req[bank][SlideAddrGenA:MaskB],
-          ext_operand_req[bank][VFU_LoadUnit:VFU_SlideUnit]}),
+               ext_operand_req[bank][VFU_Alu],
+               ext_operand_req[bank][VFU_MFpu],
+               ext_operand_req[bank][VFU_Tmac],
+               ext_operand_req[bank][VFU_MaskUnit],
+               ext_operand_req[bank][VFU_SlideUnit],
+               ext_operand_req[bank][VFU_LoadUnit]}),
       .gnt_o ({operand_gnt[bank][SlideAddrGenA:MaskB],
-          operand_gnt[bank][NrOperandQueues + VFU_LoadUnit:NrOperandQueues + VFU_SlideUnit]}),
+               operand_gnt[bank][NrOperandQueues + VFU_Alu],
+               operand_gnt[bank][NrOperandQueues + VFU_MFpu],
+                operand_gnt[bank][NrOperandQueues + VFU_Tmac],
+               operand_gnt[bank][NrOperandQueues + VFU_MaskUnit],
+               operand_gnt[bank][NrOperandQueues + VFU_SlideUnit],
+               operand_gnt[bank][NrOperandQueues + VFU_LoadUnit]}),
       .data_o (payload_lp    ),
       .idx_o  (/* Unused */  ),
       .req_o  (payload_lp_req),
       .gnt_i  (payload_lp_gnt)
     );
 
-    // High-priority requests always mask low-priority requests
+
     rr_arb_tree #(
-      .NumIn    (2               ),
+      .NumIn    (3               ),
       .DataWidth($bits(payload_t)),
       .AxiVldRdy(1'b0            ),
       .ExtPrio  (1'b1            )
@@ -635,9 +747,9 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
       .rst_ni (rst_ni                           ),
       .flush_i(1'b0                             ),
       .rr_i   (1'b0                             ),
-      .data_i ({payload_lp, payload_hp}         ),
-      .req_i  ({payload_lp_req, payload_hp_req} ),
-      .gnt_o  ({payload_lp_gnt, payload_hp_gnt} ),
+      .data_i ({payload_lp, payload_mp_custom, payload_hp_opq}),
+      .req_i  ({payload_lp_req, payload_mp_custom_req, payload_hp_opq_req}),
+      .gnt_o  ({payload_lp_gnt, payload_mp_custom_gnt, payload_hp_opq_gnt}),
       .data_o ({vrf_addr_o[bank], vrf_wen_o[bank], vrf_wdata_o[bank], vrf_be_o[bank],
           vrf_tgt_opqueue_o[bank]}),
       .idx_o (/* Unused */    ),
@@ -645,5 +757,9 @@ module operand_requester import ara_pkg::*; import rvv_pkg::*; #(
       .gnt_i (vrf_req_o[bank] ) // Acknowledge it directly
     );
   end : gen_vrf_arbiters
+
+  always_comb begin
+    custom_pe_stream_ready = custom_pe_result_gnt;
+  end
 
 endmodule : operand_requester

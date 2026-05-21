@@ -7,7 +7,7 @@ module arch_showdown_tb;
   import rvv_pkg::*;
 
   /////////////////////////////////////////////////////////
-  //  Global Parameters 
+  // Global Parameters 
   /////////////////////////////////////////////////////////
   localparam int unsigned ClockPeriod = 6; 
   localparam int unsigned A_BITS = 8;
@@ -38,18 +38,19 @@ module arch_showdown_tb;
   localparam int unsigned WGT_CACHE_HIT_RATE = 10;  
 
   /////////////////////////////////////////////////////////
-  //  Test Data & Models
+  // Test Data & Models
   /////////////////////////////////////////////////////////
   typedef struct { string model_name; string test_files[]; } model_t;
   model_t models[];
 
   string current_test_file, current_test_name, current_model_name;
+  string saif_out_name;
   logic signed [7:0] input_data [0:15000000]; 
   logic [1:0]        weight_data[0:15000000];
   integer            input_num, fp_r, dummy_var, idx;
 
   /////////////////////////////////////////////////////////
-  //  DUT Signals (Separated for 3 Architectures)
+  // DUT Signals (Separated for 3 Architectures)
   /////////////////////////////////////////////////////////
   logic clk_i, rst_ni;
   
@@ -78,7 +79,7 @@ module arch_showdown_tb;
   vxsat_t      vxsat_o_rvv, vxsat_o_tmac, vxsat_o_pe;
 
   /////////////////////////////////////////////////////////
-  //  Instantiate 3 Architectures
+  // Instantiate 3 Architectures
   /////////////////////////////////////////////////////////
   
   // [1] Traditional RVV (No Packing, Software Unpack Penalty)
@@ -109,7 +110,7 @@ module arch_showdown_tb;
   );
 
   /////////////////////////////////////////////////////////
-  //  Metrics & Results Struct
+  // Metrics & Results Struct
   /////////////////////////////////////////////////////////
   typedef struct {
     string model_name;
@@ -140,7 +141,7 @@ module arch_showdown_tb;
   always @(posedge clk_i) if (!rst_ni) cycles <= 0; else cycles <= cycles + 1;
 
   /////////////////////////////////////////////////////////
-  //  Tasks
+  // Tasks
   /////////////////////////////////////////////////////////
   task automatic reset_duts();
     rst_ni = 1'b0; 
@@ -273,7 +274,7 @@ module arch_showdown_tb;
         join
         pe_end = cycles;
       end
-    join
+    </join
 
     // --- Performance and Energy Metrics Derivation ---
     time_rvv  = real'(rvv_end - rvv_start) * real'(ClockPeriod);
@@ -316,7 +317,9 @@ module arch_showdown_tb;
 
   task automatic init_models();
     string llama_tests[] = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"};
-    models = new[9 ];
+    
+    // Allocate array capacity for all 9 target evaluation workloads
+    models = new[9];
     models[0].model_name = "microsoft__bitnet-b1.58-2B-4T";
     models[1].model_name = "1bitLLM__bitnet_b1_58-large";
     models[2].model_name = "1bitLLM__bitnet_b1_58-3B";
@@ -326,6 +329,7 @@ module arch_showdown_tb;
     models[6].model_name = "SparseLLM__ReluLLaMA-7B";
     models[7].model_name = "SparseLLM__ReluLLaMA-70B";
     models[8].model_name = "SparseLLM__ReluFalcon-40B";
+    
     foreach (models[i]) models[i].test_files = llama_tests;
   endtask
 
@@ -371,7 +375,13 @@ module arch_showdown_tb;
   endtask
 
   initial begin
-    $display(">>>>> Starting Unified Showdown Testbench...");
+    // Bind back-annotated gate-level SDF timing parameters to target instance
+    $sdf_annotate("./output_synthesis_simd_pe_pipelined/baseline_16L_4way_W2A8/simd_pe_syn.sdf", dut_pe);
+    $display(">>>>> Starting Unified Showdown Testbench with GLS...");
+    
+    // Set up switching activity recording boundaries
+    $set_toggle_region(dut_pe);
+
     reset_duts(); 
     init_models();
     results = new[models.size()];
@@ -383,9 +393,21 @@ module arch_showdown_tb;
         current_test_name = models[i].test_files[j];
         current_test_file = {BASE_PATH, current_model_name, "/layer_00/", current_test_name, "_testdata.txt"};
         read_testdata(); 
+        
+        // Enable toggle recording window
+        $toggle_start();
+        
         run_showdown_test();
+        
+        // Disable toggle recording window
+        $toggle_stop();
+        
+        // Dump unique workload-specific backward SAIF file
+        saif_out_name = $sformatf("pe_%s_%s.saif", current_model_name, current_test_name);
+        $toggle_report(saif_out_name, 1.0e-9, "arch_showdown_tb.dut_pe");
       end
     end
+    
     print_summary(); 
     $finish;
   end
